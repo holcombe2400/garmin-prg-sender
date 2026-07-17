@@ -1,0 +1,38 @@
+﻿# Build outputs
+bin/
+dist/
+outputs/
+logs/
+*.prg
+*.debug.xml
+*.iq
+*.zip
+*.exe
+
+# Garmin compiler scratch
+gen/
+mir/
+internal-mir/
+external-mir/
+
+# Python / local runtime
+.venv/
+.runtime/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local agent/session state
+.agents/
+.codex/
+
+# Secrets and local config
+*.der
+*.key
+.env
+local.env
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
