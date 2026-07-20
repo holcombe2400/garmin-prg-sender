@@ -67,6 +67,18 @@ class GuiHelperTests(unittest.TestCase):
             "Connected to watch. Ready to send.",
         )
         self.assertEqual(
+            verification_status_from_output("Pair result: already paired.\n"),
+            "Watch is already paired with Windows.",
+        )
+        self.assertEqual(
+            verification_status_from_output("Pair result: status=paired protection=default\n"),
+            "Watch paired with Windows.",
+        )
+        self.assertEqual(
+            verification_status_from_output("Windows says this device cannot be paired right now. Put the watch in Pair Phone mode and retry.\n"),
+            "Put the watch in Pair Phone mode, then try Pair Watch again.",
+        )
+        self.assertEqual(
             verification_status_from_output("Garmon is not registered\n"),
             "Garmon is not registered",
         )

@@ -58,6 +58,14 @@ def verification_status_from_output(text: str) -> str | None:
         return "No Connect IQ app slots available"
     if "GFDI registration succeeded" in text or "GFDI transport initialized" in text:
         return "Connected to watch. Ready to send."
+    if "Pair result: already paired" in text:
+        return "Watch is already paired with Windows."
+    if "Pair result: status=paired" in text:
+        return "Watch paired with Windows."
+    if "Windows says this device cannot be paired right now" in text:
+        return "Put the watch in Pair Phone mode, then try Pair Watch again."
+    if "No visible BLE device matched" in text:
+        return "No matching watch found for pairing."
     if "PRG staged for Garmin Connect phone sync" in text:
         return "Upload complete. Turn phone Bluetooth back on."
 
@@ -140,8 +148,11 @@ class SenderGui:
         watch.columnconfigure(1, weight=1)
         ttk.Label(watch, text="Address").grid(row=0, column=0, padx=8, pady=8, sticky="w")
         ttk.Entry(watch, textvariable=self.address_var).grid(row=0, column=1, padx=8, pady=8, sticky="ew")
+        pair_button = ttk.Button(watch, text="Pair Watch", command=self.pair_watch)
+        pair_button.grid(row=0, column=2, padx=8, pady=8, sticky="ew")
+        self.run_buttons.append(pair_button)
         connect_button = ttk.Button(watch, text="Connect / Check Watch", command=self.connect_watch)
-        connect_button.grid(row=0, column=2, padx=8, pady=8, sticky="ew")
+        connect_button.grid(row=0, column=3, padx=8, pady=8, sticky="ew")
         self.run_buttons.append(connect_button)
 
         actions = ttk.Frame(outer)
@@ -215,6 +226,24 @@ class SenderGui:
                 "--debug",
             ],
             "Connect to Watch",
+        )
+
+    def pair_watch(self) -> None:
+        address = self._clean_address()
+        if not address:
+            messagebox.showerror("Missing watch address", "Enter the watch Bluetooth address first.")
+            return
+        self._set_progress(0)
+        self._run(
+            [
+                "--pair-windows-ble",
+                "--address",
+                address,
+                "--connect-timeout",
+                "75",
+                "--debug",
+            ],
+            "Pair Watch",
         )
 
     def send_prg(self) -> None:
@@ -343,6 +372,8 @@ class SenderGui:
         self._append(" ".join(f'"{part}"' if " " in part else part for part in command) + "\n")
         if label == "Connect to Watch":
             self.status_var.set("Connecting to watch...")
+        elif label == "Pair Watch":
+            self.status_var.set("Pairing watch with Windows...")
         elif label == "Send PRG to Watch":
             self.status_var.set("Sending PRG to watch...")
         else:
@@ -413,6 +444,8 @@ class SenderGui:
             return
         if label == "Connect to Watch":
             self.status_var.set("Connection check finished.")
+        elif label == "Pair Watch":
+            self.status_var.set("Pairing finished. Connect to check watch.")
         elif label == "Send PRG to Watch":
             self._set_progress(100)
             self.status_var.set("Upload complete. Turn phone Bluetooth back on.")

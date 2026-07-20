@@ -51,7 +51,13 @@ from .smart_dump import (
 )
 from .transport import GarminTransport, create_ble_transport, inspect_garmin_support
 from .uploader import GarminPrgUploader, UploadProgress, UploadResult
-from .windows_diagnostic import list_windows_ble_devices, run_winrt_diagnostic, unpair_windows_ble_device, wait_for_live_gatt
+from .windows_diagnostic import (
+    list_windows_ble_devices,
+    pair_windows_ble_device,
+    run_winrt_diagnostic,
+    unpair_windows_ble_device,
+    wait_for_live_gatt,
+)
 
 
 DEFAULT_GARMON_PRG = Path(__file__).resolve().parents[2] / "test-prgs" / "GarmonInstallTest_fenix6pro_43KB.prg"
@@ -158,6 +164,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scan", action="store_true", help="List nearby BLE devices and exit")
     parser.add_argument("--scan-seconds", type=float, default=8.0, help="BLE scan duration")
     parser.add_argument("--list-windows-ble", action="store_true", help="List cached Windows BLE devices and extracted addresses")
+    parser.add_argument("--pair-windows-ble", action="store_true", help="Pair a visible BLE device with Windows; use --address or --name")
+    parser.add_argument("--pair-scan-seconds", type=float, default=12.0, help="BLE scan duration when pairing by --name")
     parser.add_argument("--unpair-windows-ble", action="store_true", help="Remove a cached Windows BLE pairing entry; dry-run unless --confirm-unpair is provided")
     parser.add_argument("--confirm-unpair", action="store_true", help="Actually remove the Windows BLE pairing entry selected by --unpair-windows-ble")
     parser.add_argument("--probe", action="store_true", help="Connect and list GATT services without writing")
@@ -186,6 +194,23 @@ def main(argv: list[str] | None = None) -> int:
             if args.debug:
                 traceback.print_exc()
             print(f"Windows BLE listing failed: {exc}", file=sys.stderr)
+            return 1
+
+    if args.pair_windows_ble:
+        try:
+            return asyncio.run(
+                pair_windows_ble_device(
+                    args.address,
+                    args.name,
+                    args.address_type,
+                    timeout=args.connect_timeout,
+                    scan_seconds=args.pair_scan_seconds,
+                )
+            )
+        except Exception as exc:
+            if args.debug:
+                traceback.print_exc()
+            print(f"Windows BLE pairing failed: {exc}", file=sys.stderr)
             return 1
 
     if args.unpair_windows_ble:

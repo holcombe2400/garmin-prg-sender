@@ -157,6 +157,76 @@ async def list_windows_ble_devices(name_filter: str | None = None, timeout: floa
     return 0
 
 
+async def pair_windows_ble_device(
+    address: str | None,
+    name_filter: str | None,
+    address_type: str | None = None,
+    *,
+    timeout: float = 45.0,
+    scan_seconds: float = 12.0,
+) -> int:
+    if sys.platform != "win32":
+        print("Windows BLE pairing is only available on Windows.")
+        return 2
+    if not address and not name_filter:
+        print("Provide --address or --name to choose a BLE device for pairing.")
+        return 2
+
+    try:
+        from bleak import BleakScanner
+        from bleak.backends.winrt.client import FutureLike
+        from winrt.windows.devices.bluetooth import BluetoothAddressType, BluetoothLEDevice
+    except ImportError as exc:
+        raise RuntimeError("Install dependencies first: python -m pip install -r requirements.txt") from exc
+
+    target_address = format_ble_address(parse_ble_address(address)) if address else None
+    target_name = None
+    if target_address is None:
+        resolved = await _resolve_visible_ble_device_by_name(BleakScanner, name_filter or "", scan_seconds)
+        if resolved is None:
+            return 3
+        target_address, target_name = resolved
+
+    print(f"Opening BLE device {target_address} for Windows pairing...")
+    device = await _open_device(BluetoothLEDevice, BluetoothAddressType, parse_ble_address(target_address), address_type, timeout)
+    if device is None:
+        print("Windows did not open this BLE device. Put the watch in pairing mode and scan again.")
+        return 4
+
+    try:
+        device_name = str(_safe_attr(device, "name") or target_name or "")
+        info = _safe_attr(device, "device_information")
+        pairing = _safe_attr(info, "pairing") if info is not None else None
+        if pairing is None:
+            print(f"Windows did not expose pairing information for {device_name or '(no name)'}  address={target_address}.")
+            return 5
+
+        is_paired = bool(_safe_attr(pairing, "is_paired"))
+        can_pair = bool(_safe_attr(pairing, "can_pair"))
+        print(
+            "Matched BLE device: "
+            f"{device_name or '(no name)'}  address={target_address}  "
+            f"paired={_format_optional_bool(is_paired)}  can_pair={_format_optional_bool(can_pair)}"
+        )
+        if is_paired:
+            print("Pair result: already paired.")
+            return 0
+        if not can_pair:
+            print("Windows says this device cannot be paired right now. Put the watch in Pair Phone mode and retry.")
+            return 6
+
+        print("Starting Windows BLE pairing. Confirm any Windows or watch prompt if it appears.")
+        result = await asyncio.wait_for(FutureLike(pairing.pair_async()), timeout=timeout)
+        status = _enum_name(_safe_attr(result, "status"))
+        protection = _enum_name(_safe_attr(result, "protection_level_used"))
+        print(f"Pair result: status={status} protection={protection}")
+        return 0 if status in {"paired", "already_paired"} else 7
+    finally:
+        close = getattr(device, "close", None)
+        if callable(close):
+            close()
+
+
 async def unpair_windows_ble_device(address: str | None, name_filter: str | None, confirm: bool, timeout: float = 10.0) -> int:
     if sys.platform != "win32":
         print("Windows BLE unpair is only available on Windows.")
@@ -229,6 +299,34 @@ async def _find_cached_ble_infos(FutureLike: Any, BluetoothLEDevice: Any, Device
             continue
         matches.append(info)
     return matches
+
+
+async def _resolve_visible_ble_device_by_name(BleakScanner: Any, name_filter: str, scan_seconds: float) -> tuple[str, str] | None:
+    wanted = name_filter.lower()
+    print(f"Scanning for BLE devices matching name {name_filter!r}...")
+    discovered = await BleakScanner.discover(timeout=scan_seconds, return_adv=True)
+    matches: list[tuple[str, str, int | None]] = []
+    for _key, value in discovered.items():
+        device, adv = value
+        name = device.name or "(no name)"
+        if wanted and wanted not in name.lower():
+            continue
+        matches.append((device.address, name, getattr(adv, "rssi", None)))
+
+    if not matches:
+        print("No visible BLE device matched. Put the watch in Pair Phone mode and retry.")
+        return None
+    if len(matches) > 1:
+        print("Multiple visible BLE devices matched; use --address.")
+        for match_address, match_name, rssi in sorted(matches, key=lambda item: (item[1].lower(), item[0])):
+            rssi_text = f" rssi={rssi}" if rssi is not None else ""
+            print(f"  {match_name}  address={match_address}{rssi_text}")
+        return None
+
+    match_address, match_name, rssi = matches[0]
+    rssi_text = f" rssi={rssi}" if rssi is not None else ""
+    print(f"Found visible BLE device: {match_name}  address={match_address}{rssi_text}")
+    return format_ble_address(parse_ble_address(match_address)), match_name
 
 
 async def check_live_gatt(address: str, address_type: str | None, timeout: float) -> LiveGattCheck:

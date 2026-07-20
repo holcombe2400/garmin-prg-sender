@@ -106,11 +106,14 @@ The GUI is intentionally simple now:
 
 1. Choose a `.prg`.
 2. Turn phone Bluetooth off so Windows can keep the watch BLE connection.
-3. Click `Connect / Check Watch`.
-4. Click `Send PRG to Watch` and wait for the load bar to reach 100%.
-5. Turn phone Bluetooth back on. Garmin Connect should reconnect in the background and finish the Connect IQ install.
+3. If Windows has not paired with this watch yet, put the watch in `Pair Phone` mode and click `Pair Watch`.
+4. Click `Connect / Check Watch`.
+5. Click `Send PRG to Watch` and wait for the load bar to reach 100%.
+6. Turn phone Bluetooth back on. Garmin Connect should reconnect in the background and finish the Connect IQ install.
 
 Use `Show Details` only when you want the command log. `Check Install` queries the watch's installed-app registry after the phone sync has had time to run. `stage-for-phone-sync-latest.jsonl` is replaced on each new send so the details log and summary reflect the latest run.
+
+Pairing is a Windows BLE pairing step only. It does not pair the watch with Garmin Connect and it does not install the PRG by itself. If `Pair Watch` says Windows cannot pair the device right now, put the watch back into `Pair Phone` mode and make sure the owner's phone Bluetooth is not taking the connection first.
 
 On Windows, if the paired watch shows the right cached Garmin services but live GATT is unreachable, start `--wait-live`, then put the watch back into pairing mode. Once `--wait-live` reports reachable services, use `--probe-gfdi`; if that succeeds, send the PRG. `--winrt-services cached` can be added to `--probe`, `--probe-gfdi`, or live send commands when Windows already has the Garmin service list cached.
 

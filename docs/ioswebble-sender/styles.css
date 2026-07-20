@@ -1,0 +1,181 @@
+:root {
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f5f7f9;
+  color: #17202a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #f5f7f9;
+}
+
+.app {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.1;
+}
+
+.muted,
+.meta {
+  color: #617181;
+  font-size: 13px;
+}
+
+.muted {
+  margin: 4px 0 0;
+}
+
+.panel {
+  background: #fff;
+  border: 1px solid #dfe6ee;
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.label {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+input[type="file"] {
+  display: block;
+  width: 100%;
+}
+
+button {
+  border: 1px solid #215c7c;
+  border-radius: 8px;
+  background: #fff;
+  color: #215c7c;
+  min-height: 44px;
+  padding: 0 14px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+button:disabled {
+  border-color: #a8b3bd;
+  color: #8a97a3;
+}
+
+button.primary {
+  width: 100%;
+  margin-top: 14px;
+  background: #1f7a4d;
+  border-color: #1f7a4d;
+  color: #fff;
+}
+
+button.secondary {
+  min-height: 38px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.settings {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.settings label {
+  display: grid;
+  gap: 5px;
+  color: #435160;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings input {
+  min-height: 38px;
+  width: 100%;
+  border: 1px solid #cfd8e2;
+  border-radius: 6px;
+  padding: 0 8px;
+  font-size: 15px;
+}
+
+.badge {
+  border-radius: 999px;
+  border: 1px solid #cfd8e2;
+  color: #435160;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.badge.ok {
+  border-color: #89c2a3;
+  color: #166534;
+}
+
+.badge.bad {
+  border-color: #e4a7a7;
+  color: #991b1b;
+}
+
+.progress-row {
+  display: grid;
+  grid-template-columns: 1fr 48px;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+progress {
+  width: 100%;
+  height: 14px;
+}
+
+.status {
+  margin-top: 10px;
+  color: #17202a;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow: auto;
+  background: #111827;
+  color: #d1d5db;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 12px;
+}
+
+@media (max-width: 540px) {
+  .settings,
+  .row {
+    grid-template-columns: 1fr;
+  }
+}
