@@ -85,6 +85,7 @@ const detailsButton = document.querySelector("#detailsButton");
 const packetSizeInput = document.querySelector("#packetSizeInput");
 const fragmentSizeInput = document.querySelector("#fragmentSizeInput");
 const writeDelayInput = document.querySelector("#writeDelayInput");
+const apiModeInput = document.querySelector("#apiModeInput");
 const pickerModeInput = document.querySelector("#pickerModeInput");
 const scanButton = document.querySelector("#scanButton");
 const stopScanButton = document.querySelector("#stopScanButton");
@@ -111,6 +112,11 @@ async function init() {
     detailsButton.textContent = logEl.hidden ? "Show Details" : "Hide Details";
   });
   fileInput.addEventListener("change", onFileSelected);
+  apiModeInput.addEventListener("change", () => {
+    log(`Bluetooth API mode changed to ${apiModeInput.value}. ${bluetoothApiStatusText()}`);
+    refreshBleAvailability();
+    updateButtons();
+  });
   chooseWatchButton.addEventListener("click", chooseWatch);
   connectButton.addEventListener("click", connectWatch);
   scanButton.addEventListener("click", runDiagnosticScan);
@@ -137,7 +143,7 @@ async function refreshBleAvailability() {
   const bluetooth = getBluetooth();
   if (!bluetooth) {
     setBleState("no webble", false);
-    setStatus("iOSWebBLE/Web Bluetooth is not available in this browser.");
+    setStatus(`iOSWebBLE/Web Bluetooth is not available in this browser. ${bluetoothApiStatusText()}`);
     return;
   }
   if (typeof bluetooth.getAvailability === "function") {
@@ -177,6 +183,7 @@ async function chooseWatch() {
     const bluetooth = requireBluetooth();
     const pickerMode = pickerModeInput.value;
     const requestOptions = buildDeviceRequestOptions(pickerMode);
+    log(`Bluetooth API mode: ${apiModeInput.value}. ${bluetoothApiStatusText()}`);
     log(`Opening WebBLE device chooser (${pickerMode} mode).`);
     selectedDevice = await bluetooth.requestDevice(requestOptions);
     connection = null;
@@ -207,6 +214,7 @@ async function chooseWatch() {
 async function runDiagnosticScan() {
   if (isScanning) return;
   const bluetooth = requireBluetooth();
+  log(`Bluetooth API mode: ${apiModeInput.value}. ${bluetoothApiStatusText()}`);
   if (typeof bluetooth.requestLEScan !== "function") {
     setStatus("Diagnostic scanning is not available in this WebBLE runtime.");
     log("navigator.bluetooth.requestLEScan is not available.");
@@ -246,6 +254,9 @@ async function runDiagnosticScan() {
     setStatus("Scanning BLE advertisements for 20 seconds.");
   } catch (error) {
     stopDiagnosticScan("Scan failed.", false);
+    if (isHandleMessageError(error)) {
+      log("This iOSWebBLE runtime appears to expose requestLEScan incompletely; use Choose Watch instead of Scan 20s.");
+    }
     showError("Diagnostic scan failed", error);
   }
 }
@@ -923,7 +934,15 @@ function gfdiUuid(shortValue) {
 }
 
 function getBluetooth() {
-  return navigator.bluetooth || navigator.webble || null;
+  const mode = apiModeInput?.value || "webble-first";
+  if (mode === "webble-only") return navigator.webble || null;
+  if (mode === "bluetooth-only") return navigator.bluetooth || null;
+  if (mode === "bluetooth-first") return navigator.bluetooth || navigator.webble || null;
+  return navigator.webble || navigator.bluetooth || null;
+}
+
+function bluetoothApiStatusText() {
+  return `navigator.webble=${Boolean(navigator.webble)} navigator.bluetooth=${Boolean(navigator.bluetooth)}`;
 }
 
 function buildDeviceRequestOptions(mode) {
@@ -1172,6 +1191,10 @@ function messageOf(error) {
 
 function isOriginPickerRejection(error) {
   return messageOf(error).includes("was not offered to this origin via the device picker");
+}
+
+function isHandleMessageError(error) {
+  return messageOf(error).includes("handleMessage");
 }
 
 function log(message) {

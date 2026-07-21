@@ -21,6 +21,8 @@ The Windows BLE address, such as `C0:28:8D:9A:C4:71`, is not exposed to Web Blue
 
 If iOSWebBLE reports that a device "was not offered to this origin via the device picker", refresh the page and retry with `Garmin filter`. Use `Broad picker` only as a fallback when the Garmin-filtered picker cannot see the watch.
 
+If the picker still rejects a selected device, leave `Picker mode` on `Garmin filter` and try changing `Bluetooth API` from `iOSWebBLE first` to `Standard first`, then `iOSWebBLE only`.
+
 If `Garmin filter` reports no devices, the watch is probably not advertising while Garmin Connect is holding the phone link. Force-close Garmin Connect and put the watch into `Pair Phone` mode long enough to choose it. You do not need to forget the normal pairing for this test.
 
 Use `Scan 20s` when the picker times out quickly. It does not connect to a device or upload anything; it only logs advertisements that iOSWebBLE can see.

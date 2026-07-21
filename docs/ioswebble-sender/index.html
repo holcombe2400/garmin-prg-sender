@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG WebBLE Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260721-scan-diagnostics">
+    <link rel="stylesheet" href="./styles.css?v=20260721-api-mode">
     <script src="https://ioswebble.com/webble.js"></script>
-    <script type="module" src="./app.js?v=20260721-scan-diagnostics"></script>
+    <script type="module" src="./app.js?v=20260721-api-mode"></script>
   </head>
   <body>
     <main class="app">
@@ -25,6 +25,13 @@
       </section>
 
       <section class="panel">
+        <label class="label" for="apiModeInput">Bluetooth API</label>
+        <select id="apiModeInput">
+          <option value="webble-first" selected>iOSWebBLE first</option>
+          <option value="bluetooth-first">Standard first</option>
+          <option value="webble-only">iOSWebBLE only</option>
+          <option value="bluetooth-only">Standard only</option>
+        </select>
         <label class="label" for="pickerModeInput">Picker mode</label>
         <select id="pickerModeInput">
           <option value="garmin" selected>Garmin filter</option>
