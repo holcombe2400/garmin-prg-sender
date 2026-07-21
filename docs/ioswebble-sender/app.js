@@ -18,7 +18,11 @@ const UUIDS = {
   v1Send: "6a4e4c80-667b-11e3-949a-0800200c9a66",
   v0Service: "9b012401-bc30-ce9a-e111-0f67e491abde",
   v0Receive: "4acbcd28-7425-868e-f447-915c8f00d0cb",
-  v0Send: "df334c80-e6a7-d082-274d-78fc66f85e16"
+  v0Send: "df334c80-e6a7-d082-274d-78fc66f85e16",
+  deviceInformation: "0000180a-0000-1000-8000-00805f9b34fb",
+  observedFenix6: "72daa6c3-29c2-6283-0c4a-2818e4d37e75",
+  observedGarmin1: "3e1d50cd-7e3e-427d-8e1c-b78aa87fe624",
+  observedGarmin2: "daf56201-0000-1000-8000-00805f9b34fb"
 };
 
 const GarminMessage = {
@@ -840,7 +844,15 @@ function getBluetooth() {
 }
 
 function buildDeviceRequestOptions(mode) {
-  const optionalServices = [UUIDS.v2Service, UUIDS.v1Service, UUIDS.v0Service];
+  const optionalServices = [
+    UUIDS.v2Service,
+    UUIDS.v1Service,
+    UUIDS.v0Service,
+    UUIDS.deviceInformation,
+    UUIDS.observedFenix6,
+    UUIDS.observedGarmin1,
+    UUIDS.observedGarmin2
+  ];
   if (mode === "broad") {
     return {
       acceptAllDevices: true,
@@ -849,6 +861,10 @@ function buildDeviceRequestOptions(mode) {
   }
   return {
     filters: [
+      { services: [UUIDS.observedFenix6] },
+      { services: [UUIDS.observedGarmin1] },
+      { services: [UUIDS.observedGarmin2] },
+      { services: [UUIDS.deviceInformation] },
       { services: [UUIDS.v2Service] },
       { services: [UUIDS.v1Service] },
       { services: [UUIDS.v0Service] },
