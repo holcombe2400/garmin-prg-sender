@@ -86,13 +86,22 @@ const packetSizeInput = document.querySelector("#packetSizeInput");
 const fragmentSizeInput = document.querySelector("#fragmentSizeInput");
 const writeDelayInput = document.querySelector("#writeDelayInput");
 const pickerModeInput = document.querySelector("#pickerModeInput");
+const scanButton = document.querySelector("#scanButton");
+const stopScanButton = document.querySelector("#stopScanButton");
+const scanSummary = document.querySelector("#scanSummary");
 
 let selectedFile = null;
 let selectedDevice = null;
 let connection = null;
 let isBusy = false;
+let isScanning = false;
 let targetConfirmed = false;
 let trustedDevice = loadTrustedDevice();
+let activeScan = null;
+let scanTimer = null;
+let scanAdvertisementHandler = null;
+let scanAdvertisementCount = 0;
+let scanDevices = new Map();
 
 init().catch((error) => showError("Startup failed", error));
 
@@ -104,6 +113,8 @@ async function init() {
   fileInput.addEventListener("change", onFileSelected);
   chooseWatchButton.addEventListener("click", chooseWatch);
   connectButton.addEventListener("click", connectWatch);
+  scanButton.addEventListener("click", runDiagnosticScan);
+  stopScanButton.addEventListener("click", () => stopDiagnosticScan("Scan stopped."));
   rememberWatchButton.addEventListener("click", rememberSelectedWatch);
   clearWatchButton.addEventListener("click", clearTrustedWatch);
   confirmTargetInput.addEventListener("change", () => {
@@ -190,6 +201,78 @@ async function chooseWatch() {
     showError("Watch selection failed", error);
   } finally {
     setBusy(false);
+  }
+}
+
+async function runDiagnosticScan() {
+  if (isScanning) return;
+  const bluetooth = requireBluetooth();
+  if (typeof bluetooth.requestLEScan !== "function") {
+    setStatus("Diagnostic scanning is not available in this WebBLE runtime.");
+    log("navigator.bluetooth.requestLEScan is not available.");
+    return;
+  }
+
+  scanAdvertisementCount = 0;
+  scanDevices = new Map();
+  scanSummary.textContent = "Scanning...";
+  setScanning(true);
+
+  scanAdvertisementHandler = (event) => {
+    scanAdvertisementCount += 1;
+    const item = describeAdvertisement(event);
+    scanDevices.set(item.id, item);
+    scanSummary.textContent = `${scanDevices.size} device(s), ${scanAdvertisementCount} advertisement(s)`;
+    log(formatAdvertisement(item));
+  };
+
+  bluetooth.addEventListener("advertisementreceived", scanAdvertisementHandler);
+  try {
+    try {
+      log("Starting 20s all-advertisements scan.");
+      activeScan = await bluetooth.requestLEScan({
+        acceptAllAdvertisements: true,
+        keepRepeatedDevices: true
+      });
+    } catch (error) {
+      log(`All-advertisements scan failed: ${messageOf(error)}`);
+      log("Retrying 20s Garmin-filtered scan.");
+      activeScan = await bluetooth.requestLEScan({
+        filters: buildDiagnosticScanFilters(),
+        keepRepeatedDevices: true
+      });
+    }
+    scanTimer = window.setTimeout(() => stopDiagnosticScan("Scan complete."), 20000);
+    setStatus("Scanning BLE advertisements for 20 seconds.");
+  } catch (error) {
+    stopDiagnosticScan("Scan failed.", false);
+    showError("Diagnostic scan failed", error);
+  }
+}
+
+function stopDiagnosticScan(message = "Scan complete.", shouldLog = true) {
+  const bluetooth = getBluetooth();
+  if (scanTimer) {
+    window.clearTimeout(scanTimer);
+    scanTimer = null;
+  }
+  if (activeScan && typeof activeScan.stop === "function") {
+    try {
+      activeScan.stop();
+    } catch (error) {
+      log(`Scan stop failed: ${messageOf(error)}`);
+    }
+  }
+  activeScan = null;
+  if (scanAdvertisementHandler && bluetooth?.removeEventListener) {
+    bluetooth.removeEventListener("advertisementreceived", scanAdvertisementHandler);
+  }
+  scanAdvertisementHandler = null;
+  setScanning(false);
+  scanSummary.textContent = `${scanDevices.size} device(s), ${scanAdvertisementCount} advertisement(s)`;
+  setStatus(`${message} Saw ${scanDevices.size} device(s).`);
+  if (shouldLog) {
+    log(`${message} Saw ${scanDevices.size} device(s), ${scanAdvertisementCount} advertisement(s).`);
   }
 }
 
@@ -877,6 +960,54 @@ function buildDeviceRequestOptions(mode) {
   };
 }
 
+function buildDiagnosticScanFilters() {
+  return [
+    { services: [UUIDS.observedFenix6] },
+    { services: [UUIDS.observedGarmin1] },
+    { services: [UUIDS.observedGarmin2] },
+    { services: [UUIDS.deviceInformation] },
+    { services: [UUIDS.v2Service] },
+    { services: [UUIDS.v1Service] },
+    { services: [UUIDS.v0Service] }
+  ];
+}
+
+function describeAdvertisement(event) {
+  const uuids = Array.from(event.uuids || []).map((uuid) => String(uuid).toLowerCase());
+  const manufacturerIds = event.manufacturerData ? Array.from(event.manufacturerData.keys()) : [];
+  const serviceDataIds = event.serviceData ? Array.from(event.serviceData.keys()) : [];
+  return {
+    id: event.device?.id || `advertisement-${scanAdvertisementCount}`,
+    name: event.device?.name || "(no name)",
+    rssi: Number.isFinite(event.rssi) ? event.rssi : null,
+    uuids,
+    manufacturerIds,
+    serviceDataIds,
+    likelyGarmin: isLikelyGarminAdvertisement(event.device?.name || "", uuids)
+  };
+}
+
+function formatAdvertisement(item) {
+  const rssiText = item.rssi === null ? "rssi=?" : `rssi=${item.rssi}`;
+  const marker = item.likelyGarmin ? "GARMIN? " : "";
+  const manufacturers = item.manufacturerIds.length ? ` manufacturers=[${item.manufacturerIds.join(", ")}]` : "";
+  const serviceData = item.serviceDataIds.length ? ` serviceData=[${item.serviceDataIds.join(", ")}]` : "";
+  return `ADV ${marker}${item.name} id=${item.id} ${rssiText} uuids=[${item.uuids.join(", ")}]${manufacturers}${serviceData}`;
+}
+
+function isLikelyGarminAdvertisement(name, uuids) {
+  const lowerName = name.toLowerCase();
+  return lowerName.includes("garmin")
+    || lowerName.includes("fenix")
+    || lowerName.includes("fēnix")
+    || uuids.includes(UUIDS.observedFenix6)
+    || uuids.includes(UUIDS.observedGarmin1)
+    || uuids.includes(UUIDS.observedGarmin2)
+    || uuids.includes(UUIDS.v2Service)
+    || uuids.includes(UUIDS.v1Service)
+    || uuids.includes(UUIDS.v0Service);
+}
+
 function requireBluetooth() {
   const bluetooth = getBluetooth();
   if (!bluetooth) throw new Error("iOSWebBLE/Web Bluetooth is not available.");
@@ -998,16 +1129,23 @@ function deviceLabel(device) {
 }
 
 function updateButtons() {
-  chooseWatchButton.disabled = isBusy || !getBluetooth();
-  connectButton.disabled = isBusy || !selectedDevice;
-  rememberWatchButton.disabled = isBusy || !connection || !selectedDevice?.id;
-  clearWatchButton.disabled = isBusy || !trustedDevice;
-  confirmTargetInput.disabled = isBusy || !connection || hasTrustedMismatch();
-  sendButton.disabled = isBusy || !selectedFile || !connection || !targetConfirmed || hasTrustedMismatch();
+  chooseWatchButton.disabled = isBusy || isScanning || !getBluetooth();
+  connectButton.disabled = isBusy || isScanning || !selectedDevice;
+  scanButton.disabled = isBusy || isScanning || !getBluetooth();
+  stopScanButton.disabled = !isScanning;
+  rememberWatchButton.disabled = isBusy || isScanning || !connection || !selectedDevice?.id;
+  clearWatchButton.disabled = isBusy || isScanning || !trustedDevice;
+  confirmTargetInput.disabled = isBusy || isScanning || !connection || hasTrustedMismatch();
+  sendButton.disabled = isBusy || isScanning || !selectedFile || !connection || !targetConfirmed || hasTrustedMismatch();
 }
 
 function setBusy(value) {
   isBusy = value;
+  updateButtons();
+}
+
+function setScanning(value) {
+  isScanning = value;
   updateButtons();
 }
 

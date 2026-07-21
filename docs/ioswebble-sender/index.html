@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG WebBLE Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260721-observed-garmin-filter">
+    <link rel="stylesheet" href="./styles.css?v=20260721-scan-diagnostics">
     <script src="https://ioswebble.com/webble.js"></script>
-    <script type="module" src="./app.js?v=20260721-observed-garmin-filter"></script>
+    <script type="module" src="./app.js?v=20260721-scan-diagnostics"></script>
   </head>
   <body>
     <main class="app">
@@ -56,6 +56,14 @@
             <button id="clearWatchButton" type="button" class="secondary" disabled>Clear</button>
           </div>
         </div>
+      </section>
+
+      <section class="panel">
+        <div class="row">
+          <button id="scanButton" type="button">Scan 20s</button>
+          <button id="stopScanButton" type="button" disabled>Stop Scan</button>
+        </div>
+        <div id="scanSummary" class="meta">No scan run yet</div>
       </section>
 
       <section class="panel">

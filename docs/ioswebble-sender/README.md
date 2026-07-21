@@ -23,6 +23,8 @@ If iOSWebBLE reports that a device "was not offered to this origin via the devic
 
 If `Garmin filter` reports no devices, the watch is probably not advertising while Garmin Connect is holding the phone link. Force-close Garmin Connect and put the watch into `Pair Phone` mode long enough to choose it. You do not need to forget the normal pairing for this test.
 
+Use `Scan 20s` when the picker times out quickly. It does not connect to a device or upload anything; it only logs advertisements that iOSWebBLE can see.
+
 ## Hosting
 
 iOS Web Bluetooth requires a secure context. GitHub Pages is the simplest path:
