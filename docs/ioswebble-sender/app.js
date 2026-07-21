@@ -65,6 +65,10 @@ const connectButton = document.querySelector("#connectButton");
 const sendButton = document.querySelector("#sendButton");
 const bleState = document.querySelector("#bleState");
 const watchMeta = document.querySelector("#watchMeta");
+const watchIdentity = document.querySelector("#watchIdentity");
+const deviceIdText = document.querySelector("#deviceIdText");
+const transportText = document.querySelector("#transportText");
+const confirmTargetInput = document.querySelector("#confirmTargetInput");
 const progressBar = document.querySelector("#progressBar");
 const progressText = document.querySelector("#progressText");
 const statusText = document.querySelector("#statusText");
@@ -78,6 +82,7 @@ let selectedFile = null;
 let selectedDevice = null;
 let connection = null;
 let isBusy = false;
+let targetConfirmed = false;
 
 init().catch((error) => showError("Startup failed", error));
 
@@ -89,6 +94,16 @@ async function init() {
   fileInput.addEventListener("change", onFileSelected);
   chooseWatchButton.addEventListener("click", chooseWatch);
   connectButton.addEventListener("click", connectWatch);
+  confirmTargetInput.addEventListener("change", () => {
+    targetConfirmed = confirmTargetInput.checked;
+    if (targetConfirmed && selectedDevice) {
+      log(`Confirmed target watch: ${deviceLabel(selectedDevice)}`);
+      setStatus("Target watch confirmed.");
+    } else {
+      setStatus("Target watch confirmation cleared.");
+    }
+    updateButtons();
+  });
   sendButton.addEventListener("click", sendPrg);
   await refreshBleAvailability();
   updateButtons();
@@ -141,15 +156,19 @@ async function chooseWatch() {
       acceptAllDevices: true,
       optionalServices: [UUIDS.v2Service, UUIDS.v1Service, UUIDS.v0Service]
     });
+    connection = null;
+    setTargetConfirmed(false);
     selectedDevice.addEventListener?.("gattserverdisconnected", () => {
       connection = null;
+      setTargetConfirmed(false);
+      transportText.textContent = "Disconnected";
       log("Watch disconnected.");
       setStatus("Watch disconnected.");
       updateButtons();
     });
-    watchMeta.textContent = `${selectedDevice.name || "(no name)"} - ${selectedDevice.id || "selected"}`;
+    updateWatchIdentity("Not connected");
     setStatus("Watch selected.");
-    log(`Selected watch: ${selectedDevice.name || "(no name)"}`);
+    log(`Selected watch: ${deviceLabel(selectedDevice)}`);
   } catch (error) {
     showError("Watch selection failed", error);
   } finally {
@@ -166,10 +185,14 @@ async function connectWatch() {
       writeFragmentSize: readNumber(fragmentSizeInput, 20),
       writeDelayMs: readNumber(writeDelayInput, 0)
     });
+    setTargetConfirmed(false);
+    updateWatchIdentity(`Connected using Garmin ${connection.kind}`);
     setStatus(`Connected using Garmin ${connection.kind} transport.`);
-    log(`Connected using Garmin ${connection.kind} transport.`);
+    log(`Connected using Garmin ${connection.kind} transport. Confirm the target before sending.`);
   } catch (error) {
     connection = null;
+    setTargetConfirmed(false);
+    updateWatchIdentity("Connection failed");
     showError("Connection failed", error);
   } finally {
     setBusy(false);
@@ -177,7 +200,7 @@ async function connectWatch() {
 }
 
 async function sendPrg() {
-  if (!selectedFile || !connection) return;
+  if (!selectedFile || !connection || !targetConfirmed) return;
   try {
     setBusy(true);
     setProgress(0, 0, selectedFile.size);
@@ -818,10 +841,36 @@ function setProgress(percent, offset, total) {
   if (total > 0) setStatus(`Uploaded ${offset.toLocaleString()} / ${total.toLocaleString()} bytes`);
 }
 
+function updateWatchIdentity(transportTextValue) {
+  if (!selectedDevice) {
+    watchIdentity.hidden = true;
+    watchMeta.textContent = "No watch selected";
+    deviceIdText.textContent = "-";
+    transportText.textContent = "Not connected";
+    return;
+  }
+  watchIdentity.hidden = false;
+  watchMeta.textContent = deviceLabel(selectedDevice);
+  deviceIdText.textContent = selectedDevice.id || "Browser did not expose a device id";
+  transportText.textContent = transportTextValue;
+}
+
+function setTargetConfirmed(value) {
+  targetConfirmed = value;
+  confirmTargetInput.checked = value;
+}
+
+function deviceLabel(device) {
+  const name = device?.name || "(no name)";
+  const id = device?.id ? ` - ${device.id}` : "";
+  return `${name}${id}`;
+}
+
 function updateButtons() {
   chooseWatchButton.disabled = isBusy || !getBluetooth();
   connectButton.disabled = isBusy || !selectedDevice;
-  sendButton.disabled = isBusy || !selectedFile || !connection;
+  confirmTargetInput.disabled = isBusy || !connection;
+  sendButton.disabled = isBusy || !selectedFile || !connection || !targetConfirmed;
 }
 
 function setBusy(value) {

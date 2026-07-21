@@ -59,6 +59,13 @@ h1 {
   margin-bottom: 8px;
 }
 
+.mini-label {
+  color: #435160;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
 input[type="file"] {
   display: block;
   width: 100%;
@@ -96,6 +103,39 @@ button.secondary {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+.identity {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e7edf4;
+}
+
+.mono {
+  color: #17202a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.confirm-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  color: #17202a;
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.confirm-target input {
+  width: 20px;
+  height: 20px;
 }
 
 .settings {
@@ -175,7 +215,12 @@ pre {
 
 @media (max-width: 540px) {
   .settings,
+  .identity,
   .row {
     grid-template-columns: 1fr;
+  }
+
+  .confirm-target {
+    justify-content: flex-start;
   }
 }
