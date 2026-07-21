@@ -115,6 +115,14 @@ button.secondary {
   border-top: 1px solid #e7edf4;
 }
 
+.identity.ok {
+  border-top-color: #89c2a3;
+}
+
+.identity.warn {
+  border-top-color: #d97706;
+}
+
 .mono {
   color: #17202a;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -136,6 +144,21 @@ button.secondary {
 .confirm-target input {
   width: 20px;
   height: 20px;
+}
+
+.trusted-watch {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e7edf4;
+}
+
+.trusted-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .settings {
@@ -216,11 +239,17 @@ pre {
 @media (max-width: 540px) {
   .settings,
   .identity,
+  .trusted-watch,
   .row {
     grid-template-columns: 1fr;
   }
 
   .confirm-target {
     justify-content: flex-start;
+  }
+
+  .trusted-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
   }
 }

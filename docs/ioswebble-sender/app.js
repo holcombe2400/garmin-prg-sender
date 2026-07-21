@@ -2,6 +2,7 @@ const PRG_MAGIC = [0xd0, 0x00, 0xd0];
 const PRG_TYPE = 255;
 const PRG_SUBTYPE = 17;
 const MAX_EXPECTED_PRG_SIZE = 10 * 1024 * 1024;
+const TRUSTED_DEVICE_KEY = "garminPrgSender.trustedDevice";
 
 const GADGETBRIDGE_CLIENT_ID = 2;
 const REQUEST_REGISTER_ML = 0;
@@ -69,6 +70,9 @@ const watchIdentity = document.querySelector("#watchIdentity");
 const deviceIdText = document.querySelector("#deviceIdText");
 const transportText = document.querySelector("#transportText");
 const confirmTargetInput = document.querySelector("#confirmTargetInput");
+const trustedWatchText = document.querySelector("#trustedWatchText");
+const rememberWatchButton = document.querySelector("#rememberWatchButton");
+const clearWatchButton = document.querySelector("#clearWatchButton");
 const progressBar = document.querySelector("#progressBar");
 const progressText = document.querySelector("#progressText");
 const statusText = document.querySelector("#statusText");
@@ -83,6 +87,7 @@ let selectedDevice = null;
 let connection = null;
 let isBusy = false;
 let targetConfirmed = false;
+let trustedDevice = loadTrustedDevice();
 
 init().catch((error) => showError("Startup failed", error));
 
@@ -94,6 +99,8 @@ async function init() {
   fileInput.addEventListener("change", onFileSelected);
   chooseWatchButton.addEventListener("click", chooseWatch);
   connectButton.addEventListener("click", connectWatch);
+  rememberWatchButton.addEventListener("click", rememberSelectedWatch);
+  clearWatchButton.addEventListener("click", clearTrustedWatch);
   confirmTargetInput.addEventListener("change", () => {
     targetConfirmed = confirmTargetInput.checked;
     if (targetConfirmed && selectedDevice) {
@@ -105,6 +112,7 @@ async function init() {
     updateButtons();
   });
   sendButton.addEventListener("click", sendPrg);
+  updateTrustedWatchUi();
   await refreshBleAvailability();
   updateButtons();
 }
@@ -161,12 +169,14 @@ async function chooseWatch() {
     selectedDevice.addEventListener?.("gattserverdisconnected", () => {
       connection = null;
       setTargetConfirmed(false);
-      transportText.textContent = "Disconnected";
+      updateWatchIdentity("Disconnected");
+      updateTrustedWatchUi();
       log("Watch disconnected.");
       setStatus("Watch disconnected.");
       updateButtons();
     });
     updateWatchIdentity("Not connected");
+    updateTrustedWatchUi();
     setStatus("Watch selected.");
     log(`Selected watch: ${deviceLabel(selectedDevice)}`);
   } catch (error) {
@@ -187,7 +197,15 @@ async function connectWatch() {
     });
     setTargetConfirmed(false);
     updateWatchIdentity(`Connected using Garmin ${connection.kind}`);
-    setStatus(`Connected using Garmin ${connection.kind} transport.`);
+    updateTrustedWatchUi();
+    if (hasTrustedMismatch()) {
+      setStatus("Connected device does not match the trusted watch. Clear or replace the trusted watch to send.");
+      log("Connected device does not match the trusted watch; upload is blocked.");
+    } else if (!trustedDevice) {
+      setStatus(`Connected using Garmin ${connection.kind}. Use Remember after confirming this is the right watch.`);
+    } else {
+      setStatus(`Connected using Garmin ${connection.kind} transport.`);
+    }
     log(`Connected using Garmin ${connection.kind} transport. Confirm the target before sending.`);
   } catch (error) {
     connection = null;
@@ -200,7 +218,7 @@ async function connectWatch() {
 }
 
 async function sendPrg() {
-  if (!selectedFile || !connection || !targetConfirmed) return;
+  if (!selectedFile || !connection || !targetConfirmed || hasTrustedMismatch()) return;
   try {
     setBusy(true);
     setProgress(0, 0, selectedFile.size);
@@ -844,20 +862,92 @@ function setProgress(percent, offset, total) {
 function updateWatchIdentity(transportTextValue) {
   if (!selectedDevice) {
     watchIdentity.hidden = true;
+    watchIdentity.classList.remove("warn", "ok");
     watchMeta.textContent = "No watch selected";
     deviceIdText.textContent = "-";
     transportText.textContent = "Not connected";
     return;
   }
   watchIdentity.hidden = false;
+  watchIdentity.classList.toggle("warn", hasTrustedMismatch());
+  watchIdentity.classList.toggle("ok", Boolean(trustedDevice) && !hasTrustedMismatch());
   watchMeta.textContent = deviceLabel(selectedDevice);
   deviceIdText.textContent = selectedDevice.id || "Browser did not expose a device id";
-  transportText.textContent = transportTextValue;
+  transportText.textContent = `${transportTextValue}. ${trustedWatchStatusText()}`;
 }
 
 function setTargetConfirmed(value) {
   targetConfirmed = value;
   confirmTargetInput.checked = value;
+}
+
+function rememberSelectedWatch() {
+  if (!selectedDevice?.id) {
+    showError("Cannot remember watch", new Error("This browser did not expose a stable device id."));
+    return;
+  }
+  trustedDevice = {
+    id: selectedDevice.id,
+    label: deviceLabel(selectedDevice),
+    savedAt: new Date().toISOString()
+  };
+  saveTrustedDevice(trustedDevice);
+  setTargetConfirmed(false);
+  updateWatchIdentity(connection ? `Connected using Garmin ${connection.kind}` : "Not connected");
+  updateTrustedWatchUi();
+  setStatus("Trusted watch saved. Confirm target watch to send.");
+  log(`Trusted watch saved: ${trustedDevice.label}`);
+  updateButtons();
+}
+
+function clearTrustedWatch() {
+  trustedDevice = null;
+  saveTrustedDevice(null);
+  setTargetConfirmed(false);
+  updateWatchIdentity(connection ? `Connected using Garmin ${connection.kind}` : "Not connected");
+  updateTrustedWatchUi();
+  setStatus("Trusted watch cleared.");
+  log("Trusted watch cleared.");
+  updateButtons();
+}
+
+function updateTrustedWatchUi() {
+  if (!trustedDevice) {
+    trustedWatchText.textContent = "None saved";
+  } else {
+    trustedWatchText.textContent = trustedDevice.label || trustedDevice.id;
+  }
+  clearWatchButton.disabled = isBusy || !trustedDevice;
+}
+
+function hasTrustedMismatch() {
+  if (!trustedDevice) return false;
+  if (!selectedDevice?.id) return true;
+  return selectedDevice.id !== trustedDevice.id;
+}
+
+function trustedWatchStatusText() {
+  if (!trustedDevice) return "No trusted watch saved.";
+  if (!selectedDevice?.id) return "Trusted watch cannot be checked because no browser device id is available.";
+  return selectedDevice.id === trustedDevice.id ? "Matches trusted watch." : "Does not match trusted watch.";
+}
+
+function loadTrustedDevice() {
+  try {
+    const raw = localStorage.getItem(TRUSTED_DEVICE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveTrustedDevice(device) {
+  try {
+    if (device) localStorage.setItem(TRUSTED_DEVICE_KEY, JSON.stringify(device));
+    else localStorage.removeItem(TRUSTED_DEVICE_KEY);
+  } catch (error) {
+    log(`Could not save trusted watch: ${messageOf(error)}`);
+  }
 }
 
 function deviceLabel(device) {
@@ -869,8 +959,10 @@ function deviceLabel(device) {
 function updateButtons() {
   chooseWatchButton.disabled = isBusy || !getBluetooth();
   connectButton.disabled = isBusy || !selectedDevice;
-  confirmTargetInput.disabled = isBusy || !connection;
-  sendButton.disabled = isBusy || !selectedFile || !connection || !targetConfirmed;
+  rememberWatchButton.disabled = isBusy || !connection || !selectedDevice?.id;
+  clearWatchButton.disabled = isBusy || !trustedDevice;
+  confirmTargetInput.disabled = isBusy || !connection || hasTrustedMismatch();
+  sendButton.disabled = isBusy || !selectedFile || !connection || !targetConfirmed || hasTrustedMismatch();
 }
 
 function setBusy(value) {

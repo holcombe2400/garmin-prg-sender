@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG WebBLE Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260721-target-confirm">
+    <link rel="stylesheet" href="./styles.css?v=20260721-trusted-watch">
     <script src="https://ioswebble.com/webble.js"></script>
-    <script type="module" src="./app.js?v=20260721-target-confirm"></script>
+    <script type="module" src="./app.js?v=20260721-trusted-watch"></script>
   </head>
   <body>
     <main class="app">
@@ -40,6 +40,16 @@
             <input id="confirmTargetInput" type="checkbox">
             <span>Confirm target watch</span>
           </label>
+        </div>
+        <div class="trusted-watch">
+          <div>
+            <div class="mini-label">Trusted watch</div>
+            <div id="trustedWatchText" class="mono">None saved</div>
+          </div>
+          <div class="trusted-actions">
+            <button id="rememberWatchButton" type="button" class="secondary" disabled>Remember</button>
+            <button id="clearWatchButton" type="button" class="secondary" disabled>Clear</button>
+          </div>
         </div>
       </section>
 
