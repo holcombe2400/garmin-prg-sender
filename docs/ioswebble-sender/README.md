@@ -6,7 +6,7 @@ Host this folder over HTTPS, open `index.html` in Safari with the iOSWebBLE exte
 
 1. Force-close Garmin Connect on the sender iPhone so it does not hold the watch BLE connection.
 2. Choose a `.prg`.
-3. Tap `Choose Watch` and select the target Garmin.
+3. Leave picker mode on `Garmin filter`, tap `Choose Watch`, and select the target Garmin.
 4. Tap `Connect`.
 5. If this is the intended watch, tap `Remember` once. Future sends from this browser will be blocked unless the selected WebBLE device id matches the trusted watch.
 6. Tick `Confirm target watch`.
@@ -18,6 +18,8 @@ This does not use a native iPhone app. It relies on iOSWebBLE exposing the Web B
 ## Identifying the Watch
 
 The Windows BLE address, such as `C0:28:8D:9A:C4:71`, is not exposed to Web Bluetooth/iOSWebBLE. Browsers expose an opaque per-site device id instead. The sender can remember that browser id locally and use it as a safety check, but it cannot pre-filter the iOS picker by the Windows BLE address.
+
+If iOSWebBLE reports that a device "was not offered to this origin via the device picker", refresh the page and retry with `Garmin filter`. Use `Broad picker` only as a fallback when the Garmin-filtered picker cannot see the watch.
 
 ## Hosting
 

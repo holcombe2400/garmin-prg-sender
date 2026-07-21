@@ -81,6 +81,7 @@ const detailsButton = document.querySelector("#detailsButton");
 const packetSizeInput = document.querySelector("#packetSizeInput");
 const fragmentSizeInput = document.querySelector("#fragmentSizeInput");
 const writeDelayInput = document.querySelector("#writeDelayInput");
+const pickerModeInput = document.querySelector("#pickerModeInput");
 
 let selectedFile = null;
 let selectedDevice = null;
@@ -159,11 +160,10 @@ async function chooseWatch() {
   try {
     setBusy(true);
     const bluetooth = requireBluetooth();
-    log("Opening WebBLE device chooser.");
-    selectedDevice = await bluetooth.requestDevice({
-      acceptAllDevices: true,
-      optionalServices: [UUIDS.v2Service, UUIDS.v1Service, UUIDS.v0Service]
-    });
+    const pickerMode = pickerModeInput.value;
+    const requestOptions = buildDeviceRequestOptions(pickerMode);
+    log(`Opening WebBLE device chooser (${pickerMode} mode).`);
+    selectedDevice = await bluetooth.requestDevice(requestOptions);
     connection = null;
     setTargetConfirmed(false);
     selectedDevice.addEventListener?.("gattserverdisconnected", () => {
@@ -180,6 +180,9 @@ async function chooseWatch() {
     setStatus("Watch selected.");
     log(`Selected watch: ${deviceLabel(selectedDevice)}`);
   } catch (error) {
+    if (isOriginPickerRejection(error)) {
+      log("iOSWebBLE rejected the chosen device as not offered to this page origin. Refresh the page and retry with Garmin filter mode selected.");
+    }
     showError("Watch selection failed", error);
   } finally {
     setBusy(false);
@@ -836,6 +839,28 @@ function getBluetooth() {
   return navigator.bluetooth || navigator.webble || null;
 }
 
+function buildDeviceRequestOptions(mode) {
+  const optionalServices = [UUIDS.v2Service, UUIDS.v1Service, UUIDS.v0Service];
+  if (mode === "broad") {
+    return {
+      acceptAllDevices: true,
+      optionalServices
+    };
+  }
+  return {
+    filters: [
+      { services: [UUIDS.v2Service] },
+      { services: [UUIDS.v1Service] },
+      { services: [UUIDS.v0Service] },
+      { namePrefix: "fenix" },
+      { namePrefix: "fēnix" },
+      { namePrefix: "Fenix" },
+      { namePrefix: "Garmin" }
+    ],
+    optionalServices
+  };
+}
+
 function requireBluetooth() {
   const bluetooth = getBluetooth();
   if (!bluetooth) throw new Error("iOSWebBLE/Web Bluetooth is not available.");
@@ -989,6 +1014,10 @@ function showError(prefix, error) {
 
 function messageOf(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isOriginPickerRejection(error) {
+  return messageOf(error).includes("was not offered to this origin via the device picker");
 }
 
 function log(message) {

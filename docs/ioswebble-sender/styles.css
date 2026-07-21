@@ -71,6 +71,18 @@ input[type="file"] {
   width: 100%;
 }
 
+select {
+  width: 100%;
+  min-height: 42px;
+  margin-bottom: 12px;
+  border: 1px solid #cfd8e2;
+  border-radius: 6px;
+  background: #fff;
+  color: #17202a;
+  padding: 0 8px;
+  font-size: 15px;
+}
+
 button {
   border: 1px solid #215c7c;
   border-radius: 8px;
