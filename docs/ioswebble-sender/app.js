@@ -3,6 +3,10 @@ const PRG_TYPE = 255;
 const PRG_SUBTYPE = 17;
 const MAX_EXPECTED_PRG_SIZE = 10 * 1024 * 1024;
 const TRUSTED_DEVICE_KEY = "garminPrgSender.trustedDevice";
+const SAVED_PRG_DB_NAME = "garminPrgSender.savedPrgs";
+const SAVED_PRG_DB_VERSION = 1;
+const SAVED_PRG_STORE = "files";
+const MAX_SAVED_PRGS = 12;
 
 const GADGETBRIDGE_CLIENT_ID = 2;
 const REQUEST_REGISTER_ML = 0;
@@ -65,6 +69,10 @@ const CRC_CONSTANTS = [
 
 const fileInput = document.querySelector("#fileInput");
 const fileMeta = document.querySelector("#fileMeta");
+const savedPrgInput = document.querySelector("#savedPrgInput");
+const loadSavedPrgButton = document.querySelector("#loadSavedPrgButton");
+const deleteSavedPrgButton = document.querySelector("#deleteSavedPrgButton");
+const savedPrgMeta = document.querySelector("#savedPrgMeta");
 const chooseWatchButton = document.querySelector("#chooseWatchButton");
 const connectButton = document.querySelector("#connectButton");
 const sendButton = document.querySelector("#sendButton");
@@ -106,6 +114,7 @@ let scanTimer = null;
 let scanAdvertisementHandler = null;
 let scanAdvertisementCount = 0;
 let scanDevices = new Map();
+let savedPrgRecords = [];
 
 init().catch((error) => showError("Startup failed", error));
 
@@ -116,6 +125,12 @@ async function init() {
     detailsButton.textContent = logEl.hidden ? "Show Details" : "Hide Details";
   });
   fileInput.addEventListener("change", onFileSelected);
+  savedPrgInput.addEventListener("change", () => {
+    updateSavedPrgMeta();
+    updateButtons();
+  });
+  loadSavedPrgButton.addEventListener("click", loadSavedPrg);
+  deleteSavedPrgButton.addEventListener("click", deleteSavedPrg);
   apiModeInput.addEventListener("change", () => {
     log(`Bluetooth API mode changed to ${apiModeInput.value}. ${bluetoothApiStatusText()}`);
     updateBridgeDiagnostics();
@@ -145,6 +160,7 @@ async function init() {
   });
   sendButton.addEventListener("click", sendPrg);
   updateTrustedWatchUi();
+  await refreshSavedPrgLibrary();
   updateBridgeDiagnostics();
   logBridgeDiagnostics("Startup bridge diagnostics");
   window.setTimeout(updateBridgeDiagnostics, 500);
@@ -198,7 +214,8 @@ async function onFileSelected() {
     validatePrg(data);
     selectedFile = { name: file.name, size: data.length, data };
     fileMeta.textContent = `${file.name} - ${data.length.toLocaleString()} bytes`;
-    setStatus("PRG loaded.");
+    await savePrgToLibrary(file.name, data, file.lastModified || Date.now());
+    setStatus("PRG loaded and saved locally.");
     log(`Selected PRG: ${file.name} (${data.length} bytes)`);
   } catch (error) {
     fileInput.value = "";
@@ -206,6 +223,119 @@ async function onFileSelected() {
     showError("Invalid PRG", error);
   }
   updateButtons();
+}
+
+async function refreshSavedPrgLibrary(selectedId = savedPrgInput?.value || "") {
+  if (!savedPrgInput) return;
+  if (!supportsSavedPrgLibrary()) {
+    savedPrgRecords = [];
+    savedPrgInput.innerHTML = '<option value="">Saved PRGs unavailable</option>';
+    savedPrgInput.disabled = true;
+    savedPrgMeta.textContent = "This browser does not support local saved PRGs.";
+    updateButtons();
+    return;
+  }
+
+  try {
+    const records = await getAllSavedPrgs();
+    savedPrgRecords = records.sort((left, right) => String(right.savedAt).localeCompare(String(left.savedAt)));
+    savedPrgInput.replaceChildren();
+    if (!savedPrgRecords.length) {
+      savedPrgInput.append(new Option("No saved PRGs", ""));
+      savedPrgInput.disabled = true;
+    } else {
+      savedPrgInput.disabled = false;
+      for (const record of savedPrgRecords) {
+        savedPrgInput.append(new Option(`${record.name} (${formatBytes(record.size)})`, record.id));
+      }
+      savedPrgInput.value = savedPrgRecords.some((record) => record.id === selectedId) ? selectedId : savedPrgRecords[0].id;
+    }
+    updateSavedPrgMeta();
+  } catch (error) {
+    savedPrgRecords = [];
+    savedPrgInput.innerHTML = '<option value="">Saved PRGs error</option>';
+    savedPrgInput.disabled = true;
+    savedPrgMeta.textContent = `Saved PRGs unavailable: ${messageOf(error)}`;
+    log(`Saved PRG refresh failed: ${messageOf(error)}`);
+  }
+  updateButtons();
+}
+
+function updateSavedPrgMeta() {
+  const record = selectedSavedPrgRecord();
+  if (!record) {
+    savedPrgMeta.textContent = "Choose a PRG once to save it locally on this device.";
+    return;
+  }
+  const savedDate = record.savedAt ? new Date(record.savedAt).toLocaleString() : "unknown time";
+  savedPrgMeta.textContent = `Saved locally: ${record.name} - ${formatBytes(record.size)} - ${savedDate}`;
+}
+
+async function savePrgToLibrary(name, data, lastModified) {
+  if (!supportsSavedPrgLibrary()) {
+    savedPrgMeta.textContent = "Local saved PRGs are not available in this browser.";
+    return;
+  }
+  try {
+    const id = savedPrgId(name, data.length);
+    const record = {
+      id,
+      name,
+      size: data.length,
+      lastModified,
+      savedAt: new Date().toISOString(),
+      data: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+    };
+    await putSavedPrg(record);
+    await trimSavedPrgLibrary();
+    await refreshSavedPrgLibrary(id);
+    log(`Saved PRG locally: ${name} (${data.length} bytes)`);
+  } catch (error) {
+    savedPrgMeta.textContent = `Could not save PRG locally: ${messageOf(error)}`;
+    log(`Could not save PRG locally: ${messageOf(error)}`);
+  }
+}
+
+async function loadSavedPrg() {
+  const selectedId = savedPrgInput.value;
+  if (!selectedId) return;
+  try {
+    setBusy(true);
+    const record = await getSavedPrg(selectedId);
+    if (!record) throw new Error("Saved PRG was not found.");
+    const data = savedRecordToBytes(record);
+    validatePrg(data);
+    selectedFile = { name: record.name, size: data.length, data };
+    fileInput.value = "";
+    fileMeta.textContent = `${record.name} - ${data.length.toLocaleString()} bytes (saved)`;
+    setStatus("Saved PRG loaded.");
+    log(`Loaded saved PRG: ${record.name} (${data.length} bytes)`);
+  } catch (error) {
+    showError("Load saved PRG failed", error);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function deleteSavedPrg() {
+  const selectedId = savedPrgInput.value;
+  const record = selectedSavedPrgRecord();
+  if (!selectedId || !record) return;
+  try {
+    setBusy(true);
+    await deleteSavedPrgRecord(selectedId);
+    if (selectedFile?.name === record.name && selectedFile?.size === record.size) {
+      selectedFile = null;
+      fileMeta.textContent = "No file selected";
+    }
+    setStatus("Saved PRG deleted.");
+    log(`Deleted saved PRG: ${record.name}`);
+    await refreshSavedPrgLibrary();
+  } catch (error) {
+    showError("Delete saved PRG failed", error);
+  } finally {
+    setBusy(false);
+  }
 }
 
 async function chooseWatch() {
@@ -1476,6 +1606,101 @@ function saveTrustedDevice(device) {
   }
 }
 
+function supportsSavedPrgLibrary() {
+  return typeof indexedDB !== "undefined";
+}
+
+function selectedSavedPrgRecord() {
+  const selectedId = savedPrgInput?.value;
+  return selectedId ? savedPrgRecords.find((record) => record.id === selectedId) || null : null;
+}
+
+function savedPrgId(name, size) {
+  return `${name}::${size}`;
+}
+
+function savedRecordToBytes(record) {
+  const data = record?.data;
+  if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+  throw new Error("Saved PRG data is not readable.");
+}
+
+async function putSavedPrg(record) {
+  const db = await openSavedPrgDb();
+  await runSavedPrgTransaction(db, "readwrite", (store) => store.put(record));
+  db.close();
+}
+
+async function getSavedPrg(id) {
+  const db = await openSavedPrgDb();
+  try {
+    return await requestToPromise(db.transaction(SAVED_PRG_STORE, "readonly").objectStore(SAVED_PRG_STORE).get(id));
+  } finally {
+    db.close();
+  }
+}
+
+async function getAllSavedPrgs() {
+  const db = await openSavedPrgDb();
+  try {
+    return await requestToPromise(db.transaction(SAVED_PRG_STORE, "readonly").objectStore(SAVED_PRG_STORE).getAll());
+  } finally {
+    db.close();
+  }
+}
+
+async function deleteSavedPrgRecord(id) {
+  const db = await openSavedPrgDb();
+  await runSavedPrgTransaction(db, "readwrite", (store) => store.delete(id));
+  db.close();
+}
+
+async function trimSavedPrgLibrary() {
+  const records = await getAllSavedPrgs();
+  const oldRecords = records
+    .sort((left, right) => String(right.savedAt).localeCompare(String(left.savedAt)))
+    .slice(MAX_SAVED_PRGS);
+  for (const record of oldRecords) {
+    await deleteSavedPrgRecord(record.id);
+    log(`Removed older saved PRG: ${record.name}`);
+  }
+}
+
+function openSavedPrgDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(SAVED_PRG_DB_NAME, SAVED_PRG_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SAVED_PRG_STORE)) {
+        db.createObjectStore(SAVED_PRG_STORE, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Could not open saved PRG database."));
+    request.onblocked = () => reject(new Error("Saved PRG database is blocked by another tab."));
+  });
+}
+
+function runSavedPrgTransaction(db, mode, action) {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(SAVED_PRG_STORE, mode);
+    const store = transaction.objectStore(SAVED_PRG_STORE);
+    action(store);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("Saved PRG transaction failed."));
+    transaction.onabort = () => reject(transaction.error || new Error("Saved PRG transaction aborted."));
+  });
+}
+
+function requestToPromise(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Saved PRG request failed."));
+  });
+}
+
 function deviceLabel(device) {
   const name = device?.name || "(no name)";
   const id = device?.id ? ` - ${device.id}` : "";
@@ -1483,6 +1708,9 @@ function deviceLabel(device) {
 }
 
 function updateButtons() {
+  const hasSavedPrg = Boolean(selectedSavedPrgRecord());
+  loadSavedPrgButton.disabled = isBusy || isScanning || !hasSavedPrg;
+  deleteSavedPrgButton.disabled = isBusy || isScanning || !hasSavedPrg;
   chooseWatchButton.disabled = isBusy || isScanning || !getBluetooth();
   connectButton.disabled = isBusy || isScanning || !selectedDevice;
   scanButton.disabled = isBusy || isScanning || !getBluetooth();
@@ -1512,6 +1740,13 @@ function clampNumber(value, min, max, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, number));
+}
+
+function formatBytes(size) {
+  if (!Number.isFinite(size)) return "? bytes";
+  if (size < 1024) return `${size} bytes`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(2)} MB`;
 }
 
 function showError(prefix, error) {
