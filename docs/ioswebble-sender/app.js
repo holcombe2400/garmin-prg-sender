@@ -227,66 +227,57 @@ async function chooseWatch() {
 async function requestBluetoothDeviceWithFallback(pickerMode) {
   const candidates = getBluetoothCandidates();
   if (!candidates.length) throw new Error("iOSWebBLE/Web Bluetooth is not available.");
-  const requestVariants = buildRequestVariants(pickerMode);
 
-  let lastError = null;
-  for (let index = 0; index < candidates.length; index += 1) {
-    const candidate = candidates[index];
-    for (let variantIndex = 0; variantIndex < requestVariants.length; variantIndex += 1) {
-      const variant = requestVariants[variantIndex];
-      try {
-        const existingDevice = await getExistingDevice(candidate, variant.matchMode);
-        if (existingDevice) return existingDevice;
-        log(`Trying ${candidate.label} requestDevice (${variant.label}).`);
-        return await candidate.bluetooth.requestDevice(variant.options);
-      } catch (error) {
-        lastError = error;
-        log(`${candidate.label} requestDevice (${variant.label}) failed: ${messageOf(error)}`);
-        let foundLateCandidate = false;
-        if (isOriginPickerRejection(error)) {
-          foundLateCandidate = await appendLateBluetoothCandidates(candidates);
-          if (!foundLateCandidate) updateBridgeDiagnostics();
-        }
-        if (isOriginPickerRejection(error) && foundLateCandidate && index + 1 < candidates.length) {
-          log("Retrying with newly detected WebBLE API before trying broader picker options.");
-          break;
-        }
-        if (isOriginPickerRejection(error) && variantIndex + 1 < requestVariants.length) {
-          log("Retrying with broader picker options because the device was visible but rejected by the origin handoff.");
-          continue;
-        }
-        if (isOriginPickerRejection(error) && index + 1 < candidates.length) {
-          log("Retrying with alternate Bluetooth API because the device was visible but rejected by the origin handoff.");
-          break;
-        }
-        throw error;
+  const candidate = candidates[0];
+  const variant = buildRequestVariant(pickerMode);
+  try {
+    const existingDevice = await getExistingDevice(candidate, variant.matchMode);
+    if (existingDevice) return existingDevice;
+    log(`Trying ${candidate.label} requestDevice (${variant.label}).`);
+    return await candidate.bluetooth.requestDevice(variant.options);
+  } catch (error) {
+    log(`${candidate.label} requestDevice (${variant.label}) failed: ${messageOf(error)}`);
+    if (isOriginPickerRejection(error)) {
+      const foundLateCandidate = await appendLateBluetoothCandidates(candidates);
+      if (foundLateCandidate && apiModeInput.value !== "webble-only") {
+        apiModeInput.value = "webble-only";
+        updateBridgeDiagnostics();
+        await refreshBleAvailability();
+        updateButtons();
+        log("Switched Bluetooth API to iOSWebBLE only. Tap Choose Watch again.");
+        throw new Error("WebBLE is now active. Tap Choose Watch again; this first tap only woke the bridge.");
+      }
+      updateBridgeDiagnostics();
+      const nextMode = nextPickerMode(pickerMode);
+      if (nextMode) {
+        pickerModeInput.value = nextMode;
+        log(`Switched picker mode to ${pickerModeLabel(nextMode)}. Tap Choose Watch again.`);
+        throw new Error(`Picker handoff failed. Switched picker mode to ${pickerModeLabel(nextMode)}; tap Choose Watch again.`);
       }
     }
+    throw error;
   }
-  throw lastError || new Error("No Bluetooth API candidate returned a device.");
 }
 
-function buildRequestVariants(pickerMode) {
-  const orderedModes = [];
-  addUniqueMode(orderedModes, pickerMode);
-  addUniqueMode(orderedModes, "garmin");
-  addUniqueMode(orderedModes, "broad");
-  return orderedModes.flatMap((mode) => [
-    {
-      label: `${mode} filter, full service access`,
-      matchMode: mode,
-      options: buildDeviceRequestOptions(mode, "full")
-    },
-    {
-      label: `${mode} filter, Garmin transport services only`,
-      matchMode: mode,
-      options: buildDeviceRequestOptions(mode, "transport")
-    }
-  ]);
+function buildRequestVariant(pickerMode) {
+  return {
+    label: `${pickerMode} picker, Garmin transport services`,
+    matchMode: pickerMode,
+    options: buildDeviceRequestOptions(pickerMode, "transport")
+  };
 }
 
-function addUniqueMode(modes, mode) {
-  if (!modes.includes(mode)) modes.push(mode);
+function nextPickerMode(mode) {
+  if (mode === "name") return "garmin";
+  if (mode === "garmin") return "broad";
+  return null;
+}
+
+function pickerModeLabel(mode) {
+  if (mode === "name") return "Name filter";
+  if (mode === "garmin") return "Garmin filter";
+  if (mode === "broad") return "Broad picker";
+  return mode;
 }
 
 async function getExistingDevice(candidate, pickerMode) {
