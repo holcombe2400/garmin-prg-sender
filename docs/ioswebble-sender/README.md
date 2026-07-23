@@ -5,7 +5,7 @@ Static Web Bluetooth sender for Garmin PRG staging. Bluefy is the working iPhone
 Host this folder over HTTPS, open `index.html` in Bluefy on iPhone, then:
 
 1. Force-close Garmin Connect on the sender iPhone so it does not hold the watch BLE connection.
-2. Choose a `.prg`.
+2. Choose a `.prg`. The sender saves valid PRGs locally in Bluefy so you can load them from `Saved PRGs` next time.
 3. Leave `Bluetooth API` on `Standard only`, `Picker mode` on `Name filter: fenix 6 Pro`, and `Access mode` on `Garmin transport services`.
 4. Tap `Choose Watch`, and select the target Garmin.
 5. Tap `Connect`.
@@ -25,6 +25,15 @@ Recommended defaults:
 - Access mode: `Garmin transport services`
 
 If the name filter cannot see the watch, use `Broad picker`.
+
+## Saved PRGs
+
+The sender cannot force the iPhone file picker to open a default folder. Instead, it saves valid PRGs locally in the browser after you choose them once.
+
+- Use `Saved PRGs` to load a previously selected file.
+- Use `Delete Saved` to remove one.
+- The file stays on the device in browser storage; it is not uploaded to GitHub or any server.
+- The library keeps up to 12 saved PRGs.
 
 ## Beacio Safari Permissions
 
