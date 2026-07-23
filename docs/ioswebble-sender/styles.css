@@ -173,6 +173,18 @@ button.secondary {
   gap: 8px;
 }
 
+.bridge-box {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid #e7edf4;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
 .settings {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -252,6 +264,7 @@ pre {
   .settings,
   .identity,
   .trusted-watch,
+  .bridge-box,
   .row {
     grid-template-columns: 1fr;
   }
