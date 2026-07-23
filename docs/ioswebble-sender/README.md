@@ -16,6 +16,14 @@ Host this folder over HTTPS, open `index.html` in Bluefy on iPhone, then:
 
 This does not use a custom native iPhone app. It relies on Bluefy exposing the Web Bluetooth API.
 
+## Transfer Reliability
+
+Web Bluetooth uploads must stay in the foreground. iOS can suspend Bluefy and break the BLE connection if you answer a call, switch apps, open Control Centre long enough, lock the screen, or let the screen sleep.
+
+The sender includes `Keep screen awake during transfer`, using the browser Screen Wake Lock API when Bluefy exposes it. This can help prevent screen sleep, but it cannot keep a BLE upload alive after an app switch or phone call.
+
+If an upload is interrupted, reopen Bluefy, reconnect the watch, and send the PRG again from `Saved PRGs`. The sender can correct/resend offsets while the same upload session is alive, but it cannot resume a killed Web Bluetooth session after iOS backgrounds the app.
+
 ## Bluefy Settings
 
 Recommended defaults:
