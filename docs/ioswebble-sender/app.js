@@ -231,12 +231,10 @@ async function requestBluetoothDeviceWithFallback(pickerMode) {
   const candidate = candidates[0];
   const variant = buildRequestVariant(pickerMode);
   try {
-    const existingDevice = await getExistingDevice(candidate, variant.matchMode);
-    if (existingDevice) return existingDevice;
-    log(`Trying ${candidate.label} requestDevice (${variant.label}).`);
+    log(`Trying ${candidate.label} requestDevice directly (${variant.label}).`);
     return await candidate.bluetooth.requestDevice(variant.options);
   } catch (error) {
-    log(`${candidate.label} requestDevice (${variant.label}) failed: ${messageOf(error)}`);
+    log(`${candidate.label} requestDevice directly (${variant.label}) failed: ${messageOf(error)}`);
     if (isOriginPickerRejection(error)) {
       const foundLateCandidate = await appendLateBluetoothCandidates(candidates);
       if (foundLateCandidate && apiModeInput.value !== "webble-only") {
