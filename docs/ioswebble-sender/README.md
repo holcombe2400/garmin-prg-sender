@@ -37,6 +37,8 @@ The sender also checks Beacio/iOSWebBLE's `referringDevice` and `getDevices()` b
 
 Some iOSWebBLE builds inject `navigator.webble` only after the first picker handoff. The sender retries with any newly detected WebBLE API if the first picker attempt fails with the origin-handoff error.
 
+The sender also retries broader chooser options after the origin-handoff error: the selected picker mode first, then Garmin filters, then broad `acceptAllDevices`. These retries still request Garmin GFDI optional services so a successful selection can proceed to connection and upload.
+
 If the picker still rejects a selected device, leave `Picker mode` on `Garmin filter` and try changing `Bluetooth API` from `iOSWebBLE first` to `Standard first`, then `iOSWebBLE only`.
 
 Use `Log Bridge State` when the picker sees the watch but rejects it. Paste the details log back into the debugging thread; it shows whether Beacio is injected, active for the page origin, and which Bluetooth API object the sender is using.
