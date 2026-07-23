@@ -6,7 +6,7 @@
     <title>Garmin PRG WebBLE Sender</title>
     <link rel="stylesheet" href="./styles.css?v=20260723-bridge-diagnostics">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260723-direct-picker-request"></script>
+    <script type="module" src="./app.js?v=20260723-access-mode-ladder"></script>
   </head>
   <body>
     <main class="app">
@@ -37,6 +37,13 @@
           <option value="name" selected>Name filter: fenix 6 Pro</option>
           <option value="garmin">Garmin filter</option>
           <option value="broad">Broad picker</option>
+        </select>
+        <label class="label" for="serviceModeInput">Access mode</label>
+        <select id="serviceModeInput">
+          <option value="transport" selected>Garmin transport services</option>
+          <option value="v2">GFDI v2 only</option>
+          <option value="grant">Grant only, no services</option>
+          <option value="full">Full diagnostics services</option>
         </select>
         <div class="bridge-box">
           <div>
