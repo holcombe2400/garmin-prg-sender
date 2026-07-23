@@ -5,7 +5,7 @@ Static Web Bluetooth sender for Garmin PRG staging. Bluefy is the working iPhone
 Host this folder over HTTPS, open `index.html` in Bluefy on iPhone, then:
 
 1. Force-close Garmin Connect on the sender iPhone so it does not hold the watch BLE connection.
-2. Choose a `.prg`. The sender saves valid PRGs locally in Bluefy so you can load them from `Saved PRGs` next time.
+2. Choose a `.prg`, load one from `GitHub PRGs`, or load one from `Saved PRGs`. The sender saves valid PRGs locally in Bluefy so you can load them again next time.
 3. Leave `Bluetooth API` on `Standard only`, `Picker mode` on `Name filter: fenix 6 Pro`, and `Access mode` on `Garmin transport services`.
 4. Tap `Choose Watch`, and select the target Garmin.
 5. Tap `Connect`.
@@ -25,6 +25,24 @@ Recommended defaults:
 - Access mode: `Garmin transport services`
 
 If the name filter cannot see the watch, use `Broad picker`.
+
+## GitHub PRGs
+
+Use `GitHub PRGs` to fetch public `.prg` assets from GitHub Releases. The default repo is:
+
+```text
+holcombe2400/garmin-vpet
+```
+
+Workflow for working away from the computer:
+
+1. Build VPet PRGs on a computer or GitHub Actions.
+2. Attach the `.prg` files to a GitHub Release in `holcombe2400/garmin-vpet`.
+3. In Bluefy, tap `Refresh GitHub`.
+4. Select a PRG and tap `Load GitHub PRG`.
+5. The sender validates the file and saves it locally in `Saved PRGs`.
+
+This only supports public release assets. Do not paste GitHub tokens into the page. For private repos, use a private backend or make only release PRG assets public.
 
 ## Saved PRGs
 
