@@ -87,6 +87,7 @@ const fragmentSizeInput = document.querySelector("#fragmentSizeInput");
 const writeDelayInput = document.querySelector("#writeDelayInput");
 const apiModeInput = document.querySelector("#apiModeInput");
 const pickerModeInput = document.querySelector("#pickerModeInput");
+const serviceModeInput = document.querySelector("#serviceModeInput");
 const bridgeDiagnosticsText = document.querySelector("#bridgeDiagnosticsText");
 const bridgeDiagnosticsButton = document.querySelector("#bridgeDiagnosticsButton");
 const scanButton = document.querySelector("#scanButton");
@@ -119,6 +120,10 @@ async function init() {
     updateBridgeDiagnostics();
     refreshBleAvailability();
     updateButtons();
+  });
+  serviceModeInput.addEventListener("change", () => {
+    log(`Access mode changed to ${serviceModeLabel(serviceModeInput.value)}.`);
+    updateBridgeDiagnostics();
   });
   bridgeDiagnosticsButton?.addEventListener("click", () => logBridgeDiagnostics("Manual bridge diagnostics"));
   chooseWatchButton.addEventListener("click", chooseWatch);
@@ -212,7 +217,11 @@ async function chooseWatch() {
     updateWatchIdentity("Not connected");
     updateTrustedWatchUi();
     setStatus("Watch selected.");
-    log(`Selected watch: ${deviceLabel(selectedDevice)}`);
+    log(`Selected watch: ${deviceLabel(selectedDevice)} using ${serviceModeLabel(serviceModeInput.value)}.`);
+    if (serviceModeInput.value === "grant") {
+      log("Grant-only selection succeeded. If Connect fails with service access denied, choose the watch again with GFDI v2 only.");
+      setStatus("Watch selected with grant-only access. Try Connect; service access may be limited.");
+    }
   } catch (error) {
     if (isOriginPickerRejection(error)) {
       log("iOSWebBLE rejected the chosen device as not offered to this page origin.");
@@ -252,16 +261,25 @@ async function requestBluetoothDeviceWithFallback(pickerMode) {
         log(`Switched picker mode to ${pickerModeLabel(nextMode)}. Tap Choose Watch again.`);
         throw new Error(`Picker handoff failed. Switched picker mode to ${pickerModeLabel(nextMode)}; tap Choose Watch again.`);
       }
+      const nextService = nextServiceMode(serviceModeInput.value);
+      if (nextService) {
+        serviceModeInput.value = nextService;
+        pickerModeInput.value = "name";
+        updateBridgeDiagnostics();
+        log(`Switched access mode to ${serviceModeLabel(nextService)} and reset picker mode to Name filter. Tap Choose Watch again.`);
+        throw new Error(`Picker handoff failed. Switched access mode to ${serviceModeLabel(nextService)}; tap Choose Watch again.`);
+      }
     }
     throw error;
   }
 }
 
 function buildRequestVariant(pickerMode) {
+  const serviceMode = serviceModeInput?.value || "transport";
   return {
-    label: `${pickerMode} picker, Garmin transport services`,
+    label: `${pickerMode} picker, ${serviceModeLabel(serviceMode)}`,
     matchMode: pickerMode,
-    options: buildDeviceRequestOptions(pickerMode, "transport")
+    options: buildDeviceRequestOptions(pickerMode, serviceMode)
   };
 }
 
@@ -275,6 +293,21 @@ function pickerModeLabel(mode) {
   if (mode === "name") return "Name filter";
   if (mode === "garmin") return "Garmin filter";
   if (mode === "broad") return "Broad picker";
+  return mode;
+}
+
+function nextServiceMode(mode) {
+  if (mode === "transport") return "v2";
+  if (mode === "v2") return "grant";
+  if (mode === "full") return "transport";
+  return null;
+}
+
+function serviceModeLabel(mode) {
+  if (mode === "transport") return "Garmin transport services";
+  if (mode === "v2") return "GFDI v2 only";
+  if (mode === "grant") return "grant-only/no optional services";
+  if (mode === "full") return "full diagnostics services";
   return mode;
 }
 
@@ -1125,6 +1158,7 @@ function collectBridgeDiagnostics() {
     location: location.origin,
     pageHidden: document.hidden,
     apiMode: apiModeInput?.value || "webble-first",
+    serviceMode: serviceModeInput?.value || "transport",
     activeApi,
     candidateApis: candidates.map((candidate) => candidate.label).join(",") || "none",
     navigatorBeacio: Boolean(navigator.beacio),
@@ -1147,6 +1181,7 @@ function formatDiagnostics(diagnostics) {
     `origin=${diagnostics.location}`,
     `hidden=${diagnostics.pageHidden}`,
     `apiMode=${diagnostics.apiMode}`,
+    `accessMode=${diagnostics.serviceMode}`,
     `activeApi=${diagnostics.activeApi}`,
     `candidates=${diagnostics.candidateApis}`,
     `navigator.beacio=${diagnostics.navigatorBeacio}`,
@@ -1211,46 +1246,59 @@ function buildDeviceRequestOptions(mode, serviceSet = "full") {
     UUIDS.v1Service,
     UUIDS.v0Service
   ];
-  const optionalServices = serviceSet === "transport" ? transportServices : [
-    UUIDS.v2Service,
-    UUIDS.v1Service,
-    UUIDS.v0Service,
-    UUIDS.deviceInformation,
-    UUIDS.observedFenix6,
-    UUIDS.observedGarmin1,
-    UUIDS.observedGarmin2
-  ];
+  const optionalServicesByMode = {
+    grant: [],
+    v2: [UUIDS.v2Service],
+    transport: transportServices,
+    full: [
+      UUIDS.v2Service,
+      UUIDS.v1Service,
+      UUIDS.v0Service,
+      UUIDS.deviceInformation,
+      UUIDS.observedFenix6,
+      UUIDS.observedGarmin1,
+      UUIDS.observedGarmin2
+    ]
+  };
+  const optionalServices = optionalServicesByMode[serviceSet] || transportServices;
   if (mode === "broad") {
-    return {
-      acceptAllDevices: true,
-      optionalServices
-    };
+    return withOptionalServices({ acceptAllDevices: true }, optionalServices);
   }
   if (mode === "name") {
-    return {
+    return withOptionalServices({
       filters: [
         { name: "fenix 6 Pro" },
         { namePrefix: "fenix 6" },
         { namePrefix: "fenix" }
-      ],
-      optionalServices
-    };
+      ]
+    }, optionalServices);
   }
-  return {
-    filters: [
-      { services: [UUIDS.observedFenix6] },
-      { services: [UUIDS.observedGarmin1] },
-      { services: [UUIDS.observedGarmin2] },
-      { services: [UUIDS.deviceInformation] },
-      { services: [UUIDS.v2Service] },
-      { services: [UUIDS.v1Service] },
-      { services: [UUIDS.v0Service] },
-      { namePrefix: "fenix" },
-      { namePrefix: "Fenix" },
-      { namePrefix: "Garmin" }
-    ],
-    optionalServices
-  };
+  const garminFilters = serviceSet === "grant" ? [
+    { namePrefix: "fenix" },
+    { namePrefix: "Fenix" },
+    { namePrefix: "Garmin" }
+  ] : [
+    { services: [UUIDS.observedFenix6] },
+    { services: [UUIDS.observedGarmin1] },
+    { services: [UUIDS.observedGarmin2] },
+    { services: [UUIDS.deviceInformation] },
+    { services: [UUIDS.v2Service] },
+    { services: [UUIDS.v1Service] },
+    { services: [UUIDS.v0Service] },
+    { namePrefix: "fenix" },
+    { namePrefix: "Fenix" },
+    { namePrefix: "Garmin" }
+  ];
+  return withOptionalServices({
+    filters: garminFilters
+  }, optionalServices);
+}
+
+function withOptionalServices(options, optionalServices) {
+  if (optionalServices.length) {
+    return { ...options, optionalServices };
+  }
+  return options;
 }
 
 function buildDiagnosticScanFilters() {
