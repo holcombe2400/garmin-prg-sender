@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG WebBLE Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260721-api-mode">
+    <link rel="stylesheet" href="./styles.css?v=20260723-api-fallback">
     <script src="https://ioswebble.com/webble.js"></script>
-    <script type="module" src="./app.js?v=20260721-api-mode"></script>
+    <script type="module" src="./app.js?v=20260723-api-fallback"></script>
   </head>
   <body>
     <main class="app">
@@ -34,7 +34,8 @@
         </select>
         <label class="label" for="pickerModeInput">Picker mode</label>
         <select id="pickerModeInput">
-          <option value="garmin" selected>Garmin filter</option>
+          <option value="name" selected>Name filter: fenix 6 Pro</option>
+          <option value="garmin">Garmin filter</option>
           <option value="broad">Broad picker</option>
         </select>
         <div class="row">
