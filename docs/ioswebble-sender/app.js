@@ -100,6 +100,8 @@ const detailsButton = document.querySelector("#detailsButton");
 const packetSizeInput = document.querySelector("#packetSizeInput");
 const fragmentSizeInput = document.querySelector("#fragmentSizeInput");
 const writeDelayInput = document.querySelector("#writeDelayInput");
+const keepAwakeInput = document.querySelector("#keepAwakeInput");
+const foregroundWarning = document.querySelector("#foregroundWarning");
 const apiModeInput = document.querySelector("#apiModeInput");
 const pickerModeInput = document.querySelector("#pickerModeInput");
 const serviceModeInput = document.querySelector("#serviceModeInput");
@@ -123,6 +125,8 @@ let scanAdvertisementCount = 0;
 let scanDevices = new Map();
 let savedPrgRecords = [];
 let githubPrgAssets = [];
+let isUploading = false;
+let wakeLock = null;
 
 init().catch((error) => showError("Startup failed", error));
 
@@ -183,6 +187,13 @@ async function init() {
     }
     updateButtons();
   });
+  keepAwakeInput.addEventListener("change", () => {
+    if (keepAwakeInput.checked) {
+      requestWakeLock("manual toggle").catch((error) => log(`Keep-awake request failed: ${messageOf(error)}`));
+    } else {
+      releaseWakeLock();
+    }
+  });
   sendButton.addEventListener("click", sendPrg);
   updateTrustedWatchUi();
   await refreshSavedPrgLibrary();
@@ -192,7 +203,16 @@ async function init() {
   window.setTimeout(updateBridgeDiagnostics, 1500);
   window.addEventListener("focus", updateBridgeDiagnostics);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) updateBridgeDiagnostics();
+    if (document.hidden && isUploading) {
+      foregroundWarning.textContent = "Upload was interrupted because Bluefy left the foreground. Reopen Bluefy and restart the upload.";
+      log("Page left foreground during upload; iOS may suspend Web Bluetooth and interrupt the transfer.");
+    }
+    if (!document.hidden) {
+      updateBridgeDiagnostics();
+      if (isUploading) {
+        requestWakeLock("return to foreground").catch((error) => log(`Keep-awake request failed after foreground return: ${messageOf(error)}`));
+      }
+    }
   });
   await refreshBleAvailability();
   updateButtons();
@@ -752,7 +772,10 @@ async function connectWatch() {
 async function sendPrg() {
   if (!selectedFile || !connection || !targetConfirmed || hasTrustedMismatch()) return;
   try {
+    isUploading = true;
     setBusy(true);
+    foregroundWarning.textContent = "Keep Bluefy open in the foreground until upload reaches 100%. Calls, lock screen, or app switching can break the transfer.";
+    await requestWakeLock("upload start");
     setProgress(0, 0, selectedFile.size);
     await uploadPrg(selectedFile.data, connection, {
       maxPacketSize: readNumber(packetSizeInput, 375),
@@ -766,7 +789,34 @@ async function sendPrg() {
   } catch (error) {
     showError("Upload failed", error);
   } finally {
+    isUploading = false;
+    releaseWakeLock();
+    foregroundWarning.textContent = "Keep Bluefy open in the foreground until upload reaches 100%.";
     setBusy(false);
+  }
+}
+
+async function requestWakeLock(reason) {
+  if (!keepAwakeInput?.checked) return;
+  if (document.hidden) return;
+  if (!("wakeLock" in navigator) || typeof navigator.wakeLock.request !== "function") {
+    foregroundWarning.textContent = "Screen wake lock is not supported here. Keep Bluefy open and stop the phone from locking.";
+    return;
+  }
+  if (wakeLock) return;
+  wakeLock = await navigator.wakeLock.request("screen");
+  wakeLock.addEventListener?.("release", () => {
+    wakeLock = null;
+    log("Screen wake lock released.");
+  });
+  log(`Screen wake lock active (${reason}).`);
+}
+
+function releaseWakeLock() {
+  const lock = wakeLock;
+  wakeLock = null;
+  if (lock && typeof lock.release === "function") {
+    lock.release().catch((error) => log(`Screen wake lock release failed: ${messageOf(error)}`));
   }
 }
 
