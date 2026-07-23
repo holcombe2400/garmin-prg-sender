@@ -87,6 +87,8 @@ const fragmentSizeInput = document.querySelector("#fragmentSizeInput");
 const writeDelayInput = document.querySelector("#writeDelayInput");
 const apiModeInput = document.querySelector("#apiModeInput");
 const pickerModeInput = document.querySelector("#pickerModeInput");
+const bridgeDiagnosticsText = document.querySelector("#bridgeDiagnosticsText");
+const bridgeDiagnosticsButton = document.querySelector("#bridgeDiagnosticsButton");
 const scanButton = document.querySelector("#scanButton");
 const stopScanButton = document.querySelector("#stopScanButton");
 const scanSummary = document.querySelector("#scanSummary");
@@ -114,9 +116,11 @@ async function init() {
   fileInput.addEventListener("change", onFileSelected);
   apiModeInput.addEventListener("change", () => {
     log(`Bluetooth API mode changed to ${apiModeInput.value}. ${bluetoothApiStatusText()}`);
+    updateBridgeDiagnostics();
     refreshBleAvailability();
     updateButtons();
   });
+  bridgeDiagnosticsButton?.addEventListener("click", () => logBridgeDiagnostics("Manual bridge diagnostics"));
   chooseWatchButton.addEventListener("click", chooseWatch);
   connectButton.addEventListener("click", connectWatch);
   scanButton.addEventListener("click", runDiagnosticScan);
@@ -135,6 +139,14 @@ async function init() {
   });
   sendButton.addEventListener("click", sendPrg);
   updateTrustedWatchUi();
+  updateBridgeDiagnostics();
+  logBridgeDiagnostics("Startup bridge diagnostics");
+  window.setTimeout(updateBridgeDiagnostics, 500);
+  window.setTimeout(updateBridgeDiagnostics, 1500);
+  window.addEventListener("focus", updateBridgeDiagnostics);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) updateBridgeDiagnostics();
+  });
   await refreshBleAvailability();
   updateButtons();
 }
@@ -181,7 +193,9 @@ async function chooseWatch() {
   try {
     setBusy(true);
     const pickerMode = pickerModeInput.value;
+    updateBridgeDiagnostics();
     log(`Bluetooth API mode: ${apiModeInput.value}. ${bluetoothApiStatusText()}`);
+    logBridgeDiagnostics("Pre-picker bridge diagnostics");
     log(`Opening WebBLE device chooser (${pickerMode} mode).`);
     selectedDevice = await requestBluetoothDeviceWithFallback(pickerMode);
     connection = null;
@@ -202,6 +216,7 @@ async function chooseWatch() {
   } catch (error) {
     if (isOriginPickerRejection(error)) {
       log("iOSWebBLE rejected the chosen device as not offered to this page origin.");
+      logBridgeDiagnostics("Origin rejection bridge diagnostics");
     }
     showError("Watch selection failed", error);
   } finally {
@@ -276,7 +291,9 @@ function deviceMatchesPicker(device, pickerMode) {
 async function runDiagnosticScan() {
   if (isScanning) return;
   const bluetooth = requireBluetooth();
+  updateBridgeDiagnostics();
   log(`Bluetooth API mode: ${apiModeInput.value}. ${bluetoothApiStatusText()}`);
+  logBridgeDiagnostics("Pre-scan bridge diagnostics");
   if (typeof bluetooth.requestLEScan !== "function") {
     setStatus("Diagnostic scanning is not available in this WebBLE runtime.");
     log("navigator.bluetooth.requestLEScan is not available.");
@@ -1026,7 +1043,121 @@ function addBluetoothCandidate(candidates, label, bluetooth) {
 }
 
 function bluetoothApiStatusText() {
-  return `navigator.beacio=${Boolean(navigator.beacio)} navigator.webble=${Boolean(navigator.webble)} navigator.bluetooth=${Boolean(navigator.bluetooth)}`;
+  const diagnostics = collectBridgeDiagnostics();
+  return `navigator.beacio=${diagnostics.navigatorBeacio} navigator.webble=${diagnostics.navigatorWebble} navigator.bluetooth=${diagnostics.navigatorBluetooth} activeApi=${diagnostics.activeApi}`;
+}
+
+function updateBridgeDiagnostics() {
+  if (!bridgeDiagnosticsText) return;
+  bridgeDiagnosticsText.textContent = bridgeDiagnosticsSummary();
+}
+
+function logBridgeDiagnostics(prefix) {
+  const diagnostics = collectBridgeDiagnostics();
+  log(`${prefix}: ${formatDiagnostics(diagnostics)}`);
+}
+
+function bridgeDiagnosticsSummary() {
+  const diagnostics = collectBridgeDiagnostics();
+  const pieces = [
+    `active=${diagnostics.activeApi}`,
+    `beacio=${diagnostics.navigatorBeacio}`,
+    `webble=${diagnostics.navigatorWebble}`,
+    `bluetooth=${diagnostics.navigatorBluetooth}`,
+    `cdn=${diagnostics.beacioCdnState}`,
+    `installed=${diagnostics.beacioCdnInstalled}`,
+    `extensionActive=${diagnostics.beacioCdnActive}`
+  ];
+  return pieces.join(" ");
+}
+
+function collectBridgeDiagnostics() {
+  const dataset = document.documentElement?.dataset || {};
+  const beacioCdnState = safeDiagnosticValue(() => window.BeacioCDN?.getState?.(), "n/a");
+  const candidates = getBluetoothCandidates();
+  const activeApi = candidates[0]?.label || "none";
+  return {
+    location: location.origin,
+    pageHidden: document.hidden,
+    apiMode: apiModeInput?.value || "webble-first",
+    activeApi,
+    candidateApis: candidates.map((candidate) => candidate.label).join(",") || "none",
+    navigatorBeacio: Boolean(navigator.beacio),
+    navigatorWebble: Boolean(navigator.webble),
+    navigatorBluetooth: Boolean(navigator.bluetooth),
+    beacioCdnState,
+    beacioCdnInstalled: dataset.beacioCdnInstalled || "missing",
+    beacioCdnActive: dataset.beacioCdnActive || "missing",
+    beacioCdnDatasetState: dataset.beacioCdnState || "missing",
+    webkitMessageHandlers: listObjectKeys(window.webkit?.messageHandlers),
+    beacioMethods: listBluetoothMethods(navigator.beacio),
+    webbleMethods: listBluetoothMethods(navigator.webble),
+    bluetoothMethods: listBluetoothMethods(navigator.bluetooth),
+    bluetoothRequestDeviceSource: functionSourceKind(navigator.bluetooth?.requestDevice)
+  };
+}
+
+function formatDiagnostics(diagnostics) {
+  return [
+    `origin=${diagnostics.location}`,
+    `hidden=${diagnostics.pageHidden}`,
+    `apiMode=${diagnostics.apiMode}`,
+    `activeApi=${diagnostics.activeApi}`,
+    `candidates=${diagnostics.candidateApis}`,
+    `navigator.beacio=${diagnostics.navigatorBeacio}`,
+    `navigator.webble=${diagnostics.navigatorWebble}`,
+    `navigator.bluetooth=${diagnostics.navigatorBluetooth}`,
+    `BeacioCDN.getState=${diagnostics.beacioCdnState}`,
+    `dataset.state=${diagnostics.beacioCdnDatasetState}`,
+    `dataset.installed=${diagnostics.beacioCdnInstalled}`,
+    `dataset.active=${diagnostics.beacioCdnActive}`,
+    `webkit.handlers=${diagnostics.webkitMessageHandlers}`,
+    `beacio.methods=${diagnostics.beacioMethods}`,
+    `webble.methods=${diagnostics.webbleMethods}`,
+    `bluetooth.methods=${diagnostics.bluetoothMethods}`,
+    `bluetooth.requestDevice=${diagnostics.bluetoothRequestDeviceSource}`
+  ].join(" ");
+}
+
+function listBluetoothMethods(bluetooth) {
+  if (!bluetooth) return "none";
+  const methodNames = ["getAvailability", "getDevices", "requestDevice", "requestLEScan", "addEventListener", "removeEventListener"];
+  const available = methodNames.filter((name) => typeof bluetooth[name] === "function");
+  return available.length ? available.join(",") : "none";
+}
+
+function listObjectKeys(value) {
+  if (!value) return "none";
+  try {
+    const keys = Object.keys(value);
+    return keys.length ? keys.join(",") : "present-no-enumerable-keys";
+  } catch (error) {
+    return `unreadable:${messageOf(error)}`;
+  }
+}
+
+function functionSourceKind(fn) {
+  if (typeof fn !== "function") return "missing";
+  try {
+    const source = Function.prototype.toString.call(fn);
+    if (source.includes("[native code]")) return "native";
+    if (source.includes("beacio")) return "beacio-wrapper";
+    if (source.includes("webble")) return "webble-wrapper";
+    return `scripted:${source.slice(0, 80).replace(/\s+/g, " ")}`;
+  } catch (error) {
+    return `unreadable:${messageOf(error)}`;
+  }
+}
+
+function safeDiagnosticValue(read, fallback) {
+  try {
+    const value = read();
+    if (value === undefined || value === null) return fallback;
+    if (typeof value === "object") return JSON.stringify(value).slice(0, 180);
+    return String(value).slice(0, 180);
+  } catch (error) {
+    return `error:${messageOf(error)}`;
+  }
 }
 
 function buildDeviceRequestOptions(mode) {
