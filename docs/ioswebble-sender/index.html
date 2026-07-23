@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG WebBLE Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260723-bridge-diagnostics">
+    <link rel="stylesheet" href="./styles.css?v=20260723-github-prg-releases">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260723-saved-prg-library"></script>
+    <script type="module" src="./app.js?v=20260723-github-prg-releases"></script>
   </head>
   <body>
     <main class="app">
@@ -22,6 +22,18 @@
         <label class="label" for="fileInput">PRG file</label>
         <input id="fileInput" type="file" accept=".prg,application/octet-stream">
         <div id="fileMeta" class="meta">No file selected</div>
+
+        <label class="label saved-label" for="githubRepoInput">GitHub PRGs</label>
+        <input id="githubRepoInput" type="text" value="holcombe2400/garmin-vpet" autocapitalize="none" autocomplete="off" spellcheck="false">
+        <select id="githubPrgInput">
+          <option value="">No GitHub PRGs loaded</option>
+        </select>
+        <div class="row">
+          <button id="refreshGithubPrgsButton" type="button" class="secondary">Refresh GitHub</button>
+          <button id="loadGithubPrgButton" type="button" class="secondary" disabled>Load GitHub PRG</button>
+        </div>
+        <div id="githubPrgMeta" class="meta">Fetch public .prg assets from GitHub Releases.</div>
+
         <label class="label saved-label" for="savedPrgInput">Saved PRGs</label>
         <select id="savedPrgInput">
           <option value="">No saved PRGs</option>
