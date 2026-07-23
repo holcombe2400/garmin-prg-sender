@@ -1,8 +1,8 @@
 # iOSWebBLE PRG Sender
 
-Static Web Bluetooth sender for iOSWebBLE.
+Static Web Bluetooth sender for Beacio/iOSWebBLE.
 
-Host this folder over HTTPS, open `index.html` in Safari with the iOSWebBLE extension enabled, then:
+Host this folder over HTTPS, open `index.html` in Safari with the Beacio/iOSWebBLE extension enabled, then:
 
 1. Force-close Garmin Connect on the sender iPhone so it does not hold the watch BLE connection.
 2. Choose a `.prg`.
@@ -13,7 +13,19 @@ Host this folder over HTTPS, open `index.html` in Safari with the iOSWebBLE exte
 7. Tap `Send PRG`.
 8. After the transfer completes, let Garmin Connect on the owner phone reconnect and finish Connect IQ registration.
 
-This does not use a native iPhone app. It relies on iOSWebBLE exposing the Web Bluetooth API.
+This does not use a native iPhone app. It relies on Beacio/iOSWebBLE exposing the Web Bluetooth API.
+
+## Beacio Safari Permissions
+
+If the picker sees `fenix 6 Pro` but fails with "was not offered to this origin", check the Safari extension permission:
+
+1. In Safari, tap `aA` in the address bar.
+2. Tap the Beacio/iOSWebBLE extension icon.
+3. Choose `Always Allow`.
+4. Choose `Always Allow on Every Website`.
+5. Refresh the sender page.
+
+`Allow for One Day` can expire and leave the picker visible but the page permission broken.
 
 ## Identifying the Watch
 
