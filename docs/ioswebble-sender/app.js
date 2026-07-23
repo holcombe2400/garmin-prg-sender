@@ -242,9 +242,14 @@ async function requestBluetoothDeviceWithFallback(pickerMode) {
       } catch (error) {
         lastError = error;
         log(`${candidate.label} requestDevice (${variant.label}) failed: ${messageOf(error)}`);
+        let foundLateCandidate = false;
         if (isOriginPickerRejection(error)) {
-          const foundLateCandidate = await appendLateBluetoothCandidates(candidates);
+          foundLateCandidate = await appendLateBluetoothCandidates(candidates);
           if (!foundLateCandidate) updateBridgeDiagnostics();
+        }
+        if (isOriginPickerRejection(error) && foundLateCandidate && index + 1 < candidates.length) {
+          log("Retrying with newly detected WebBLE API before trying broader picker options.");
+          break;
         }
         if (isOriginPickerRejection(error) && variantIndex + 1 < requestVariants.length) {
           log("Retrying with broader picker options because the device was visible but rejected by the origin handoff.");
