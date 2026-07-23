@@ -1,19 +1,30 @@
-# iOSWebBLE PRG Sender
+# Garmin PRG WebBLE Sender
 
-Static Web Bluetooth sender for Beacio/iOSWebBLE.
+Static Web Bluetooth sender for Garmin PRG staging. Bluefy is the working iPhone browser path; Safari plus iOSWebBLE/Beacio can see the watch but may fail to grant the selected device back to the page origin.
 
-Host this folder over HTTPS, open `index.html` in Safari with the Beacio/iOSWebBLE extension enabled, then:
+Host this folder over HTTPS, open `index.html` in Bluefy on iPhone, then:
 
 1. Force-close Garmin Connect on the sender iPhone so it does not hold the watch BLE connection.
 2. Choose a `.prg`.
-3. Leave picker mode on `Name filter: fenix 6 Pro`, tap `Choose Watch`, and select the target Garmin.
-4. Tap `Connect`.
-5. If this is the intended watch, tap `Remember` once. Future sends from this browser will be blocked unless the selected WebBLE device id matches the trusted watch.
-6. Tick `Confirm target watch`.
-7. Tap `Send PRG`.
-8. After the transfer completes, let Garmin Connect on the owner phone reconnect and finish Connect IQ registration.
+3. Leave `Bluetooth API` on `Standard only`, `Picker mode` on `Name filter: fenix 6 Pro`, and `Access mode` on `Garmin transport services`.
+4. Tap `Choose Watch`, and select the target Garmin.
+5. Tap `Connect`.
+6. If this is the intended watch, tap `Remember` once. Future sends from this browser will be blocked unless the selected WebBLE device id matches the trusted watch.
+7. Tick `Confirm target watch`.
+8. Tap `Send PRG`.
+9. After the transfer completes, let Garmin Connect on the owner phone reconnect and finish Connect IQ registration.
 
-This does not use a native iPhone app. It relies on Beacio/iOSWebBLE exposing the Web Bluetooth API.
+This does not use a custom native iPhone app. It relies on Bluefy exposing the Web Bluetooth API.
+
+## Bluefy Settings
+
+Recommended defaults:
+
+- Bluetooth API: `Standard only`
+- Picker mode: `Name filter: fenix 6 Pro`
+- Access mode: `Garmin transport services`
+
+If the name filter cannot see the watch, use `Broad picker`.
 
 ## Beacio Safari Permissions
 
