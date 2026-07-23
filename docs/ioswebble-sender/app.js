@@ -227,30 +227,61 @@ async function chooseWatch() {
 async function requestBluetoothDeviceWithFallback(pickerMode) {
   const candidates = getBluetoothCandidates();
   if (!candidates.length) throw new Error("iOSWebBLE/Web Bluetooth is not available.");
+  const requestVariants = buildRequestVariants(pickerMode);
 
   let lastError = null;
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[index];
-    try {
-      const existingDevice = await getExistingDevice(candidate, pickerMode);
-      if (existingDevice) return existingDevice;
-      log(`Trying ${candidate.label} requestDevice.`);
-      return await candidate.bluetooth.requestDevice(buildDeviceRequestOptions(pickerMode));
-    } catch (error) {
-      lastError = error;
-      log(`${candidate.label} requestDevice failed: ${messageOf(error)}`);
-      if (isOriginPickerRejection(error)) {
-        const foundLateCandidate = await appendLateBluetoothCandidates(candidates);
-        if (!foundLateCandidate) updateBridgeDiagnostics();
+    for (let variantIndex = 0; variantIndex < requestVariants.length; variantIndex += 1) {
+      const variant = requestVariants[variantIndex];
+      try {
+        const existingDevice = await getExistingDevice(candidate, variant.matchMode);
+        if (existingDevice) return existingDevice;
+        log(`Trying ${candidate.label} requestDevice (${variant.label}).`);
+        return await candidate.bluetooth.requestDevice(variant.options);
+      } catch (error) {
+        lastError = error;
+        log(`${candidate.label} requestDevice (${variant.label}) failed: ${messageOf(error)}`);
+        if (isOriginPickerRejection(error)) {
+          const foundLateCandidate = await appendLateBluetoothCandidates(candidates);
+          if (!foundLateCandidate) updateBridgeDiagnostics();
+        }
+        if (isOriginPickerRejection(error) && variantIndex + 1 < requestVariants.length) {
+          log("Retrying with broader picker options because the device was visible but rejected by the origin handoff.");
+          continue;
+        }
+        if (isOriginPickerRejection(error) && index + 1 < candidates.length) {
+          log("Retrying with alternate Bluetooth API because the device was visible but rejected by the origin handoff.");
+          break;
+        }
+        throw error;
       }
-      if (isOriginPickerRejection(error) && index + 1 < candidates.length) {
-        log("Retrying with alternate Bluetooth API because the device was visible but rejected by the origin handoff.");
-        continue;
-      }
-      throw error;
     }
   }
   throw lastError || new Error("No Bluetooth API candidate returned a device.");
+}
+
+function buildRequestVariants(pickerMode) {
+  const orderedModes = [];
+  addUniqueMode(orderedModes, pickerMode);
+  addUniqueMode(orderedModes, "garmin");
+  addUniqueMode(orderedModes, "broad");
+  return orderedModes.flatMap((mode) => [
+    {
+      label: `${mode} filter, full service access`,
+      matchMode: mode,
+      options: buildDeviceRequestOptions(mode, "full")
+    },
+    {
+      label: `${mode} filter, Garmin transport services only`,
+      matchMode: mode,
+      options: buildDeviceRequestOptions(mode, "transport")
+    }
+  ]);
+}
+
+function addUniqueMode(modes, mode) {
+  if (!modes.includes(mode)) modes.push(mode);
 }
 
 async function getExistingDevice(candidate, pickerMode) {
@@ -1180,8 +1211,13 @@ function safeDiagnosticValue(read, fallback) {
   }
 }
 
-function buildDeviceRequestOptions(mode) {
-  const optionalServices = [
+function buildDeviceRequestOptions(mode, serviceSet = "full") {
+  const transportServices = [
+    UUIDS.v2Service,
+    UUIDS.v1Service,
+    UUIDS.v0Service
+  ];
+  const optionalServices = serviceSet === "transport" ? transportServices : [
     UUIDS.v2Service,
     UUIDS.v1Service,
     UUIDS.v0Service,
