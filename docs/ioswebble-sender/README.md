@@ -21,6 +21,8 @@ The Windows BLE address, such as `C0:28:8D:9A:C4:71`, is not exposed to Web Blue
 
 If iOSWebBLE reports that a device "was not offered to this origin via the device picker", the sender retries the alternate Bluetooth API automatically. Use `Garmin filter` or `Broad picker` only as fallbacks when the name-filtered picker cannot see the watch.
 
+The sender also checks Beacio/iOSWebBLE's `referringDevice` and `getDevices()` before opening the picker. If Beacio already has the fenix permission, this avoids the picker-origin handoff bug entirely.
+
 If the picker still rejects a selected device, leave `Picker mode` on `Garmin filter` and try changing `Bluetooth API` from `iOSWebBLE first` to `Standard first`, then `iOSWebBLE only`.
 
 If `Garmin filter` reports no devices, the watch is probably not advertising while Garmin Connect is holding the phone link. Force-close Garmin Connect and put the watch into `Pair Phone` mode long enough to choose it. You do not need to forget the normal pairing for this test.
