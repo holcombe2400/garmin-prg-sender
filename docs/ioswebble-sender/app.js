@@ -110,6 +110,7 @@ let scanDevices = new Map();
 init().catch((error) => showError("Startup failed", error));
 
 async function init() {
+  applyRuntimeDefaults();
   detailsButton.addEventListener("click", () => {
     logEl.hidden = !logEl.hidden;
     detailsButton.textContent = logEl.hidden ? "Show Details" : "Hide Details";
@@ -154,6 +155,19 @@ async function init() {
   });
   await refreshBleAvailability();
   updateButtons();
+}
+
+function applyRuntimeDefaults() {
+  const userAgent = navigator.userAgent || "";
+  const hasWebble = Boolean(navigator.webble || navigator.beacio);
+  const looksLikeSafari = /safari/i.test(userAgent) && !/chrome|crios|fxios|edgios|android/i.test(userAgent);
+  if (looksLikeSafari && hasWebble) {
+    apiModeInput.value = "webble-first";
+  } else {
+    apiModeInput.value = "bluetooth-only";
+  }
+  pickerModeInput.value = "name";
+  serviceModeInput.value = "transport";
 }
 
 async function refreshBleAvailability() {
