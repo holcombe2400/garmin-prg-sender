@@ -6,7 +6,7 @@
     <title>Garmin PRG WebBLE Sender</title>
     <link rel="stylesheet" href="./styles.css?v=20260723-bridge-diagnostics">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260723-bluefy-defaults"></script>
+    <script type="module" src="./app.js?v=20260723-saved-prg-library"></script>
   </head>
   <body>
     <main class="app">
@@ -22,6 +22,15 @@
         <label class="label" for="fileInput">PRG file</label>
         <input id="fileInput" type="file" accept=".prg,application/octet-stream">
         <div id="fileMeta" class="meta">No file selected</div>
+        <label class="label saved-label" for="savedPrgInput">Saved PRGs</label>
+        <select id="savedPrgInput">
+          <option value="">No saved PRGs</option>
+        </select>
+        <div class="row">
+          <button id="loadSavedPrgButton" type="button" class="secondary" disabled>Load Saved</button>
+          <button id="deleteSavedPrgButton" type="button" class="secondary" disabled>Delete Saved</button>
+        </div>
+        <div id="savedPrgMeta" class="meta">Choose a PRG once to save it locally on this device.</div>
       </section>
 
       <section class="panel">
