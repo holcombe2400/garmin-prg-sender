@@ -35,9 +35,9 @@ If iOSWebBLE reports that a device "was not offered to this origin via the devic
 
 The sender also checks Beacio/iOSWebBLE's `referringDevice` and `getDevices()` before opening the picker. If Beacio already has the fenix permission, this avoids the picker-origin handoff bug entirely.
 
-Some iOSWebBLE builds inject `navigator.webble` only after the first picker handoff. The sender retries with any newly detected WebBLE API if the first picker attempt fails with the origin-handoff error.
+Some iOSWebBLE builds inject `navigator.webble` only after the first picker handoff. If that happens, the first `Choose Watch` tap primes the bridge, switches the sender to `iOSWebBLE only`, and asks you to tap `Choose Watch` again.
 
-The sender also retries broader chooser options after the origin-handoff error: the selected picker mode first, then Garmin filters, then broad `acceptAllDevices`. These retries still request Garmin GFDI optional services so a successful selection can proceed to connection and upload.
+If the picker sees the watch but does not grant it back to the page, the sender makes only one picker attempt per tap. It then advances the picker mode from name filter to Garmin filter to broad picker so the next tap tests one cleaner variant.
 
 If the picker still rejects a selected device, leave `Picker mode` on `Garmin filter` and try changing `Bluetooth API` from `iOSWebBLE first` to `Standard first`, then `iOSWebBLE only`.
 
