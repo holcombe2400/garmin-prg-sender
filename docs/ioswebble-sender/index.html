@@ -6,7 +6,7 @@
     <title>Garmin PRG WebBLE Sender</title>
     <link rel="stylesheet" href="./styles.css?v=20260723-bridge-diagnostics">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260723-access-mode-ladder"></script>
+    <script type="module" src="./app.js?v=20260723-bluefy-defaults"></script>
   </head>
   <body>
     <main class="app">
@@ -27,10 +27,10 @@
       <section class="panel">
         <label class="label" for="apiModeInput">Bluetooth API</label>
         <select id="apiModeInput">
-          <option value="webble-first" selected>iOSWebBLE first</option>
+          <option value="bluetooth-only" selected>Standard only</option>
+          <option value="webble-first">iOSWebBLE first</option>
           <option value="bluetooth-first">Standard first</option>
           <option value="webble-only">iOSWebBLE only</option>
-          <option value="bluetooth-only">Standard only</option>
         </select>
         <label class="label" for="pickerModeInput">Picker mode</label>
         <select id="pickerModeInput">
