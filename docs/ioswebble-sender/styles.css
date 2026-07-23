@@ -59,6 +59,10 @@ h1 {
   margin-bottom: 8px;
 }
 
+.saved-label {
+  margin-top: 14px;
+}
+
 .mini-label {
   color: #435160;
   font-size: 12px;
