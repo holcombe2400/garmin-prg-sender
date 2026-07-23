@@ -217,6 +217,8 @@ async function requestBluetoothDeviceWithFallback(pickerMode) {
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[index];
     try {
+      const existingDevice = await getExistingDevice(candidate, pickerMode);
+      if (existingDevice) return existingDevice;
       log(`Trying ${candidate.label} requestDevice.`);
       return await candidate.bluetooth.requestDevice(buildDeviceRequestOptions(pickerMode));
     } catch (error) {
@@ -230,6 +232,45 @@ async function requestBluetoothDeviceWithFallback(pickerMode) {
     }
   }
   throw lastError || new Error("No Bluetooth API candidate returned a device.");
+}
+
+async function getExistingDevice(candidate, pickerMode) {
+  const referringDevice = candidate.bluetooth.referringDevice;
+  if (referringDevice && deviceMatchesPicker(referringDevice, pickerMode)) {
+    log(`Using ${candidate.label}.referringDevice: ${deviceLabel(referringDevice)}`);
+    return referringDevice;
+  }
+  if (typeof candidate.bluetooth.getDevices !== "function") return null;
+  try {
+    const devices = await candidate.bluetooth.getDevices();
+    log(`${candidate.label}.getDevices returned ${devices.length} device(s).`);
+    for (const device of devices) {
+      log(`Permitted device: ${deviceLabel(device)}`);
+    }
+    const matched = pickPermittedDevice(devices, pickerMode);
+    if (matched) {
+      log(`Using permitted device: ${deviceLabel(matched)}`);
+      return matched;
+    }
+  } catch (error) {
+    log(`${candidate.label}.getDevices failed: ${messageOf(error)}`);
+  }
+  return null;
+}
+
+function pickPermittedDevice(devices, pickerMode) {
+  const exact = devices.find((device) => (device.name || "").toLowerCase() === "fenix 6 pro");
+  if (exact) return exact;
+  if (pickerMode === "name") return devices.find((device) => deviceMatchesPicker(device, pickerMode)) || null;
+  const garminDevices = devices.filter((device) => deviceMatchesPicker(device, pickerMode));
+  return garminDevices.length === 1 ? garminDevices[0] : null;
+}
+
+function deviceMatchesPicker(device, pickerMode) {
+  const name = (device?.name || "").toLowerCase();
+  if (pickerMode === "broad") return true;
+  if (pickerMode === "name") return name === "fenix 6 pro" || name.startsWith("fenix 6") || name.startsWith("fenix");
+  return name.includes("garmin") || name.includes("fenix");
 }
 
 async function runDiagnosticScan() {
@@ -962,13 +1003,16 @@ function getBluetoothCandidates() {
   const mode = apiModeInput?.value || "webble-first";
   const candidates = [];
   if (mode === "webble-only") {
+    addBluetoothCandidate(candidates, "navigator.beacio", navigator.beacio);
     addBluetoothCandidate(candidates, "navigator.webble", navigator.webble);
   } else if (mode === "bluetooth-only") {
     addBluetoothCandidate(candidates, "navigator.bluetooth", navigator.bluetooth);
   } else if (mode === "bluetooth-first") {
     addBluetoothCandidate(candidates, "navigator.bluetooth", navigator.bluetooth);
+    addBluetoothCandidate(candidates, "navigator.beacio", navigator.beacio);
     addBluetoothCandidate(candidates, "navigator.webble", navigator.webble);
   } else {
+    addBluetoothCandidate(candidates, "navigator.beacio", navigator.beacio);
     addBluetoothCandidate(candidates, "navigator.webble", navigator.webble);
     addBluetoothCandidate(candidates, "navigator.bluetooth", navigator.bluetooth);
   }
@@ -982,7 +1026,7 @@ function addBluetoothCandidate(candidates, label, bluetooth) {
 }
 
 function bluetoothApiStatusText() {
-  return `navigator.webble=${Boolean(navigator.webble)} navigator.bluetooth=${Boolean(navigator.bluetooth)}`;
+  return `navigator.beacio=${Boolean(navigator.beacio)} navigator.webble=${Boolean(navigator.webble)} navigator.bluetooth=${Boolean(navigator.bluetooth)}`;
 }
 
 function buildDeviceRequestOptions(mode) {
@@ -1006,8 +1050,7 @@ function buildDeviceRequestOptions(mode) {
       filters: [
         { name: "fenix 6 Pro" },
         { namePrefix: "fenix 6" },
-        { namePrefix: "fenix" },
-        { namePrefix: "fēnix" }
+        { namePrefix: "fenix" }
       ],
       optionalServices
     };
@@ -1022,7 +1065,6 @@ function buildDeviceRequestOptions(mode) {
       { services: [UUIDS.v1Service] },
       { services: [UUIDS.v0Service] },
       { namePrefix: "fenix" },
-      { namePrefix: "fēnix" },
       { namePrefix: "Fenix" },
       { namePrefix: "Garmin" }
     ],
@@ -1069,7 +1111,6 @@ function isLikelyGarminAdvertisement(name, uuids) {
   const lowerName = name.toLowerCase();
   return lowerName.includes("garmin")
     || lowerName.includes("fenix")
-    || lowerName.includes("fēnix")
     || uuids.includes(UUIDS.observedFenix6)
     || uuids.includes(UUIDS.observedGarmin1)
     || uuids.includes(UUIDS.observedGarmin2)
