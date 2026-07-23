@@ -180,12 +180,10 @@ async function onFileSelected() {
 async function chooseWatch() {
   try {
     setBusy(true);
-    const bluetooth = requireBluetooth();
     const pickerMode = pickerModeInput.value;
-    const requestOptions = buildDeviceRequestOptions(pickerMode);
     log(`Bluetooth API mode: ${apiModeInput.value}. ${bluetoothApiStatusText()}`);
     log(`Opening WebBLE device chooser (${pickerMode} mode).`);
-    selectedDevice = await bluetooth.requestDevice(requestOptions);
+    selectedDevice = await requestBluetoothDeviceWithFallback(pickerMode);
     connection = null;
     setTargetConfirmed(false);
     selectedDevice.addEventListener?.("gattserverdisconnected", () => {
@@ -203,12 +201,35 @@ async function chooseWatch() {
     log(`Selected watch: ${deviceLabel(selectedDevice)}`);
   } catch (error) {
     if (isOriginPickerRejection(error)) {
-      log("iOSWebBLE rejected the chosen device as not offered to this page origin. Refresh the page and retry with Garmin filter mode selected.");
+      log("iOSWebBLE rejected the chosen device as not offered to this page origin.");
     }
     showError("Watch selection failed", error);
   } finally {
     setBusy(false);
   }
+}
+
+async function requestBluetoothDeviceWithFallback(pickerMode) {
+  const candidates = getBluetoothCandidates();
+  if (!candidates.length) throw new Error("iOSWebBLE/Web Bluetooth is not available.");
+
+  let lastError = null;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    try {
+      log(`Trying ${candidate.label} requestDevice.`);
+      return await candidate.bluetooth.requestDevice(buildDeviceRequestOptions(pickerMode));
+    } catch (error) {
+      lastError = error;
+      log(`${candidate.label} requestDevice failed: ${messageOf(error)}`);
+      if (isOriginPickerRejection(error) && index + 1 < candidates.length) {
+        log("Retrying with alternate Bluetooth API because the device was visible but rejected by the origin handoff.");
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError || new Error("No Bluetooth API candidate returned a device.");
 }
 
 async function runDiagnosticScan() {
@@ -934,11 +955,30 @@ function gfdiUuid(shortValue) {
 }
 
 function getBluetooth() {
+  return getBluetoothCandidates()[0]?.bluetooth || null;
+}
+
+function getBluetoothCandidates() {
   const mode = apiModeInput?.value || "webble-first";
-  if (mode === "webble-only") return navigator.webble || null;
-  if (mode === "bluetooth-only") return navigator.bluetooth || null;
-  if (mode === "bluetooth-first") return navigator.bluetooth || navigator.webble || null;
-  return navigator.webble || navigator.bluetooth || null;
+  const candidates = [];
+  if (mode === "webble-only") {
+    addBluetoothCandidate(candidates, "navigator.webble", navigator.webble);
+  } else if (mode === "bluetooth-only") {
+    addBluetoothCandidate(candidates, "navigator.bluetooth", navigator.bluetooth);
+  } else if (mode === "bluetooth-first") {
+    addBluetoothCandidate(candidates, "navigator.bluetooth", navigator.bluetooth);
+    addBluetoothCandidate(candidates, "navigator.webble", navigator.webble);
+  } else {
+    addBluetoothCandidate(candidates, "navigator.webble", navigator.webble);
+    addBluetoothCandidate(candidates, "navigator.bluetooth", navigator.bluetooth);
+  }
+  return candidates;
+}
+
+function addBluetoothCandidate(candidates, label, bluetooth) {
+  if (!bluetooth) return;
+  if (candidates.some((candidate) => candidate.bluetooth === bluetooth)) return;
+  candidates.push({ label, bluetooth });
 }
 
 function bluetoothApiStatusText() {
@@ -958,6 +998,17 @@ function buildDeviceRequestOptions(mode) {
   if (mode === "broad") {
     return {
       acceptAllDevices: true,
+      optionalServices
+    };
+  }
+  if (mode === "name") {
+    return {
+      filters: [
+        { name: "fenix 6 Pro" },
+        { namePrefix: "fenix 6" },
+        { namePrefix: "fenix" },
+        { namePrefix: "fēnix" }
+      ],
       optionalServices
     };
   }
