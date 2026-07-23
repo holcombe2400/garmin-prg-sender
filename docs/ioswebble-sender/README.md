@@ -39,6 +39,8 @@ Some iOSWebBLE builds inject `navigator.webble` only after the first picker hand
 
 `Choose Watch` calls `requestDevice()` directly from the tap. It does not call `getDevices()` first, because iOSWebBLE's native grant flow is sensitive to how the picker is entered.
 
+Use `Access mode` to test whether iOSWebBLE is failing because of Garmin service permissions. Start with `Garmin transport services`. If all picker modes fail, the page advances to `GFDI v2 only`, then `Grant only, no services`. A grant-only selection may not be able to upload, but it proves whether the picker can grant the watch to the page at all.
+
 If the picker sees the watch but does not grant it back to the page, the sender makes only one picker attempt per tap. It then advances the picker mode from name filter to Garmin filter to broad picker so the next tap tests one cleaner variant.
 
 If the picker still rejects a selected device, leave `Picker mode` on `Garmin filter` and try changing `Bluetooth API` from `iOSWebBLE first` to `Standard first`, then `iOSWebBLE only`.
