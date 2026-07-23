@@ -7,6 +7,8 @@ const SAVED_PRG_DB_NAME = "garminPrgSender.savedPrgs";
 const SAVED_PRG_DB_VERSION = 1;
 const SAVED_PRG_STORE = "files";
 const MAX_SAVED_PRGS = 12;
+const GITHUB_REPO_KEY = "garminPrgSender.githubRepo";
+const DEFAULT_GITHUB_REPO = "holcombe2400/garmin-vpet";
 
 const GADGETBRIDGE_CLIENT_ID = 2;
 const REQUEST_REGISTER_ML = 0;
@@ -69,6 +71,11 @@ const CRC_CONSTANTS = [
 
 const fileInput = document.querySelector("#fileInput");
 const fileMeta = document.querySelector("#fileMeta");
+const githubRepoInput = document.querySelector("#githubRepoInput");
+const githubPrgInput = document.querySelector("#githubPrgInput");
+const refreshGithubPrgsButton = document.querySelector("#refreshGithubPrgsButton");
+const loadGithubPrgButton = document.querySelector("#loadGithubPrgButton");
+const githubPrgMeta = document.querySelector("#githubPrgMeta");
 const savedPrgInput = document.querySelector("#savedPrgInput");
 const loadSavedPrgButton = document.querySelector("#loadSavedPrgButton");
 const deleteSavedPrgButton = document.querySelector("#deleteSavedPrgButton");
@@ -115,6 +122,7 @@ let scanAdvertisementHandler = null;
 let scanAdvertisementCount = 0;
 let scanDevices = new Map();
 let savedPrgRecords = [];
+let githubPrgAssets = [];
 
 init().catch((error) => showError("Startup failed", error));
 
@@ -125,6 +133,23 @@ async function init() {
     detailsButton.textContent = logEl.hidden ? "Show Details" : "Hide Details";
   });
   fileInput.addEventListener("change", onFileSelected);
+  githubRepoInput.value = loadGithubRepoSetting();
+  githubRepoInput.addEventListener("change", () => {
+    try {
+      const repo = normalizeGitHubRepo(githubRepoInput.value);
+      githubRepoInput.value = repo;
+      saveGithubRepoSetting(repo);
+      updateGithubPrgMeta();
+    } catch (error) {
+      githubPrgMeta.textContent = messageOf(error);
+    }
+  });
+  githubPrgInput.addEventListener("change", () => {
+    updateGithubPrgMeta();
+    updateButtons();
+  });
+  refreshGithubPrgsButton.addEventListener("click", refreshGithubPrgs);
+  loadGithubPrgButton.addEventListener("click", loadGithubPrg);
   savedPrgInput.addEventListener("change", () => {
     updateSavedPrgMeta();
     updateButtons();
@@ -336,6 +361,127 @@ async function deleteSavedPrg() {
   } finally {
     setBusy(false);
   }
+}
+
+async function refreshGithubPrgs() {
+  try {
+    setBusy(true);
+    const repo = normalizeGitHubRepo(githubRepoInput.value);
+    githubRepoInput.value = repo;
+    saveGithubRepoSetting(repo);
+    githubPrgMeta.textContent = "Fetching GitHub Releases...";
+    githubPrgInput.replaceChildren(new Option("Fetching...", ""));
+    githubPrgInput.disabled = true;
+    githubPrgAssets = [];
+    updateButtons();
+
+    const releases = await fetchGithubReleases(repo);
+    githubPrgAssets = releases
+      .flatMap((release) => (release.assets || [])
+        .filter((asset) => /\.prg$/i.test(asset.name || ""))
+        .map((asset) => ({
+          id: String(asset.id),
+          name: asset.name,
+          size: asset.size || 0,
+          downloadUrl: asset.browser_download_url,
+          apiUrl: asset.url,
+          release: release.name || release.tag_name,
+          tag: release.tag_name,
+          prerelease: Boolean(release.prerelease),
+          publishedAt: release.published_at || release.created_at || ""
+        })));
+
+    githubPrgInput.replaceChildren();
+    if (!githubPrgAssets.length) {
+      githubPrgInput.append(new Option("No .prg release assets found", ""));
+      githubPrgInput.disabled = true;
+      githubPrgMeta.textContent = `No .prg assets found in recent releases for ${repo}.`;
+    } else {
+      githubPrgInput.disabled = false;
+      for (const asset of githubPrgAssets) {
+        const releaseLabel = asset.prerelease ? `${asset.release} prerelease` : asset.release;
+        githubPrgInput.append(new Option(`${asset.name} (${formatBytes(asset.size)}) - ${releaseLabel}`, asset.id));
+      }
+      updateGithubPrgMeta();
+    }
+    log(`Fetched ${githubPrgAssets.length} GitHub PRG asset(s) from ${repo}.`);
+  } catch (error) {
+    githubPrgAssets = [];
+    githubPrgInput.replaceChildren(new Option("GitHub fetch failed", ""));
+    githubPrgInput.disabled = true;
+    githubPrgMeta.textContent = `GitHub fetch failed: ${messageOf(error)}`;
+    showError("GitHub fetch failed", error);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function loadGithubPrg() {
+  const asset = selectedGithubPrgAsset();
+  if (!asset) return;
+  try {
+    setBusy(true);
+    setStatus(`Downloading ${asset.name}...`);
+    githubPrgMeta.textContent = `Downloading ${asset.name}...`;
+    const data = await downloadGithubPrg(asset);
+    validatePrg(data);
+    selectedFile = { name: asset.name, size: data.length, data };
+    fileInput.value = "";
+    fileMeta.textContent = `${asset.name} - ${data.length.toLocaleString()} bytes (GitHub)`;
+    await savePrgToLibrary(asset.name, data, Date.parse(asset.publishedAt) || Date.now());
+    setStatus("GitHub PRG loaded and saved locally.");
+    githubPrgMeta.textContent = `Loaded ${asset.name} from ${asset.release}.`;
+    log(`Loaded GitHub PRG: ${asset.name} (${data.length} bytes) from ${asset.release}`);
+  } catch (error) {
+    showError("GitHub PRG load failed", error);
+    githubPrgMeta.textContent = `GitHub PRG load failed: ${messageOf(error)}`;
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function fetchGithubReleases(repo) {
+  const response = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=20`, {
+    headers: { Accept: "application/vnd.github+json" }
+  });
+  if (!response.ok) {
+    throw new Error(`GitHub releases returned ${response.status} ${response.statusText}`);
+  }
+  return await response.json();
+}
+
+async function downloadGithubPrg(asset) {
+  let firstError = null;
+  try {
+    return await fetchPrgBytes(asset.downloadUrl);
+  } catch (error) {
+    firstError = error;
+    log(`Direct GitHub asset download failed: ${messageOf(error)}`);
+  }
+  try {
+    return await fetchPrgBytes(asset.apiUrl, { Accept: "application/octet-stream" });
+  } catch (error) {
+    throw new Error(`Could not download GitHub PRG. ${firstError ? `${messageOf(firstError)}; ` : ""}${messageOf(error)}`);
+  }
+}
+
+async function fetchPrgBytes(url, headers = {}) {
+  const response = await fetch(url, { headers });
+  if (!response.ok) {
+    throw new Error(`download returned ${response.status} ${response.statusText}`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+function updateGithubPrgMeta() {
+  const asset = selectedGithubPrgAsset();
+  if (!asset) {
+    const repo = githubRepoInput?.value || DEFAULT_GITHUB_REPO;
+    githubPrgMeta.textContent = `Fetch public .prg release assets from ${repo}.`;
+    return;
+  }
+  const date = asset.publishedAt ? new Date(asset.publishedAt).toLocaleString() : "unknown date";
+  githubPrgMeta.textContent = `${asset.release} - ${asset.name} - ${formatBytes(asset.size)} - ${date}`;
 }
 
 async function chooseWatch() {
@@ -1606,6 +1752,44 @@ function saveTrustedDevice(device) {
   }
 }
 
+function loadGithubRepoSetting() {
+  try {
+    const raw = localStorage.getItem(GITHUB_REPO_KEY);
+    return raw ? normalizeGitHubRepo(raw) : DEFAULT_GITHUB_REPO;
+  } catch {
+    return DEFAULT_GITHUB_REPO;
+  }
+}
+
+function saveGithubRepoSetting(repo) {
+  try {
+    localStorage.setItem(GITHUB_REPO_KEY, normalizeGitHubRepo(repo));
+  } catch (error) {
+    log(`Could not save GitHub repo setting: ${messageOf(error)}`);
+  }
+}
+
+function selectedGithubPrgAsset() {
+  const selectedId = githubPrgInput?.value;
+  return selectedId ? githubPrgAssets.find((asset) => asset.id === selectedId) || null : null;
+}
+
+function normalizeGitHubRepo(value) {
+  let text = String(value || "").trim();
+  if (!text) throw new Error("Enter a GitHub repo as owner/name.");
+  text = text.replace(/^https?:\/\/github\.com\//i, "");
+  text = text.replace(/^github\.com\//i, "");
+  text = text.replace(/\.git$/i, "");
+  text = text.replace(/^\/+|\/+$/g, "");
+  const parts = text.split("/").filter(Boolean);
+  if (parts.length < 2) throw new Error("Enter a GitHub repo as owner/name.");
+  const repo = `${parts[0]}/${parts[1]}`;
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    throw new Error("GitHub repo must look like owner/name.");
+  }
+  return repo;
+}
+
 function supportsSavedPrgLibrary() {
   return typeof indexedDB !== "undefined";
 }
@@ -1708,6 +1892,9 @@ function deviceLabel(device) {
 }
 
 function updateButtons() {
+  const hasGithubPrg = Boolean(selectedGithubPrgAsset());
+  refreshGithubPrgsButton.disabled = isBusy || isScanning;
+  loadGithubPrgButton.disabled = isBusy || isScanning || !hasGithubPrg;
   const hasSavedPrg = Boolean(selectedSavedPrgRecord());
   loadSavedPrgButton.disabled = isBusy || isScanning || !hasSavedPrg;
   deleteSavedPrgButton.disabled = isBusy || isScanning || !hasSavedPrg;
