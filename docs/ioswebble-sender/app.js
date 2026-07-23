@@ -239,6 +239,10 @@ async function requestBluetoothDeviceWithFallback(pickerMode) {
     } catch (error) {
       lastError = error;
       log(`${candidate.label} requestDevice failed: ${messageOf(error)}`);
+      if (isOriginPickerRejection(error)) {
+        const foundLateCandidate = await appendLateBluetoothCandidates(candidates);
+        if (!foundLateCandidate) updateBridgeDiagnostics();
+      }
       if (isOriginPickerRejection(error) && index + 1 < candidates.length) {
         log("Retrying with alternate Bluetooth API because the device was visible but rejected by the origin handoff.");
         continue;
@@ -1040,6 +1044,22 @@ function addBluetoothCandidate(candidates, label, bluetooth) {
   if (!bluetooth) return;
   if (candidates.some((candidate) => candidate.bluetooth === bluetooth)) return;
   candidates.push({ label, bluetooth });
+}
+
+async function appendLateBluetoothCandidates(candidates) {
+  for (const delayMs of [0, 250, 750]) {
+    if (delayMs) await sleep(delayMs);
+    const freshCandidates = getBluetoothCandidates();
+    const newCandidates = freshCandidates.filter((fresh) =>
+      !candidates.some((candidate) => candidate.bluetooth === fresh.bluetooth || candidate.label === fresh.label)
+    );
+    if (!newCandidates.length) continue;
+    candidates.push(...newCandidates);
+    updateBridgeDiagnostics();
+    log(`Detected late Bluetooth API after picker handoff: ${newCandidates.map((candidate) => candidate.label).join(", ")}.`);
+    return true;
+  }
+  return false;
 }
 
 function bluetoothApiStatusText() {
