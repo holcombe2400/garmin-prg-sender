@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG WebBLE Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260723-github-prg-releases">
+    <link rel="stylesheet" href="./styles.css?v=20260723-keep-awake-upload">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260723-github-prg-releases"></script>
+    <script type="module" src="./app.js?v=20260723-keep-awake-upload"></script>
   </head>
   <body>
     <main class="app">
@@ -124,6 +124,11 @@
             <input id="writeDelayInput" type="number" min="0" max="25" step="1" value="0">
           </label>
         </div>
+        <label class="toggle-row">
+          <input id="keepAwakeInput" type="checkbox" checked>
+          <span>Keep screen awake during transfer</span>
+        </label>
+        <div id="foregroundWarning" class="meta">Keep Bluefy open in the foreground until upload reaches 100%.</div>
         <button id="sendButton" class="primary" type="button" disabled>Send PRG</button>
         <div class="progress-row">
           <progress id="progressBar" max="100" value="0"></progress>
