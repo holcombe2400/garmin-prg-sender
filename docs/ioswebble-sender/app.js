@@ -36,7 +36,7 @@ const BENCHMARK_MIN_BYTES = 12 * 1024;
 const BENCHMARK_MAX_BYTES = 24 * 1024;
 const BENCHMARK_PROFILE_TIMEOUT_MS = 18000;
 const GFDI_WRITE_TIMEOUT_MS = 10000;
-const MAX_BENCHMARK_RESTARTS = 6;
+const MAX_BENCHMARK_RESTARTS = 24;
 const WIFI_PROBE_TIMEOUT_MS = 3500;
 const WIFI_MAX_PORTS = 12;
 const MLR_FLAG_MASK = 0x80;
@@ -2747,13 +2747,15 @@ function applyTransportSettings(transport, settings) {
 
 function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set()) {
   const fragmentProfiles = buildFragmentProbeProfiles(baseSettings);
+  const largeGfdiPipelineWindow = clampNumber(baseSettings.pipelineWindow, 1, MAX_PIPELINE_WINDOW, FAST_FENIX6_MLR_TUNING.pipelineWindow);
+  const largeGfdiDelayMs = clampNumber(baseSettings.writeDelayMs, 0, 25, 0);
   const largeGfdiProfiles = shouldProbeLargeGfdi(baseSettings) ? [
-    { maxPacketSize: 1500, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 1500/20/8/0" },
-    { maxPacketSize: 2048, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 2048/20/8/0" },
-    { maxPacketSize: 3072, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 3072/20/8/0" },
-    { maxPacketSize: 4096, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 4096/20/8/0" },
-    { maxPacketSize: 6144, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 6144/20/8/0" },
-    { maxPacketSize: 8192, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 8192/20/8/0" }
+    { maxPacketSize: 1500, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 1500/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
+    { maxPacketSize: 2048, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 2048/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
+    { maxPacketSize: 3072, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 3072/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
+    { maxPacketSize: 4096, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 4096/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
+    { maxPacketSize: 6144, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 6144/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
+    { maxPacketSize: 8192, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 8192/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` }
   ] : [];
   const stableProfiles = [
     { maxPacketSize: 375, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 1, writeDelayMs: 0, label: "375/20/1/0" },
@@ -2774,8 +2776,8 @@ function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set
     { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 4, writeDelayMs: 15, label: "risky 400/20/4/15" }
   ] : [];
   const profiles = riskyPipelineInput?.checked
-    ? [...fragmentProfiles, ...largeGfdiProfiles, ...riskyProfiles, FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
-    : [...fragmentProfiles, ...largeGfdiProfiles, FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
+    ? [baseSettings, ...fragmentProfiles, ...largeGfdiProfiles, ...riskyProfiles, FAST_FENIX6_TUNING, ...stableProfiles]
+    : [baseSettings, ...fragmentProfiles, ...largeGfdiProfiles, FAST_FENIX6_TUNING, ...stableProfiles]
   return uniqueBenchmarkProfiles(profiles
     .filter((profile) => fileSize >= Math.max(1024, profile.maxPacketSize * profile.pipelineWindow))
     .filter((profile) => !failedProfiles.has(benchmarkProfileKey(profile))));
