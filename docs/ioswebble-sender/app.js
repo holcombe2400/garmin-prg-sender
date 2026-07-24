@@ -148,6 +148,7 @@ const retryButton = document.querySelector("#retryButton");
 const stopUploadButton = document.querySelector("#stopUploadButton");
 const riskyPipelineInput = document.querySelector("#riskyPipelineInput");
 const reliableMlrInput = document.querySelector("#reliableMlrInput");
+const forceLargeFragmentInput = document.querySelector("#forceLargeFragmentInput");
 const progressBar = document.querySelector("#progressBar");
 const progressText = document.querySelector("#progressText");
 const statusText = document.querySelector("#statusText");
@@ -981,7 +982,7 @@ async function connectWatch() {
     setBusy(true);
     setStatus("Connecting...");
     connection = await connectGarminTransport(selectedDevice, {
-      writeFragmentSize: readNumber(fragmentSizeInput, 20),
+      writeFragmentSize: readBleFragmentSize(),
       writeDelayMs: readNumber(writeDelayInput, 0),
       reliableMlr: Boolean(reliableMlrInput?.checked)
     });
@@ -1089,7 +1090,7 @@ async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt, sig
     log("Large GFDI packets are probing the watch/MLR breaking point. Stop + Retry is expected if the watch stops ACKing.");
   }
   if (settings.fragmentSize > SAFE_BLE_FRAGMENT_SIZE) {
-    log(`Experimental BLE fragment ${settings.fragmentSize}. Your Bluefy/iPhone path previously stalled above ${SAFE_BLE_FRAGMENT_SIZE}; use Stop + Retry if writes hang.`);
+    log(`Force large BLE fragment enabled: ${settings.fragmentSize}. Your Bluefy/iPhone path has stalled above ${SAFE_BLE_FRAGMENT_SIZE}; use this only for deliberate experiments.`);
   }
   if (settings.pipelineWindow > 1) {
     log(`Experimental pipeline window ${settings.pipelineWindow}. If upload fails, retry with Pipeline chunks 1.`);
@@ -3133,9 +3134,18 @@ function readGfdiPacketSize() {
 }
 
 function readBleFragmentSize() {
-  const value = clampNumber(fragmentSizeInput.value, SAFE_BLE_FRAGMENT_SIZE, MAX_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
-  fragmentSizeInput.value = String(value);
-  return value;
+  const requested = clampNumber(fragmentSizeInput.value, SAFE_BLE_FRAGMENT_SIZE, MAX_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
+  if (requested > SAFE_BLE_FRAGMENT_SIZE && !largeBleFragmentAllowed()) {
+    fragmentSizeInput.value = String(SAFE_BLE_FRAGMENT_SIZE);
+    log(`Bluefy guard: BLE fragment ${requested} was clamped to ${SAFE_BLE_FRAGMENT_SIZE}. Enable Force BLE fragments >20 only for experiments.`);
+    return SAFE_BLE_FRAGMENT_SIZE;
+  }
+  fragmentSizeInput.value = String(requested);
+  return requested;
+}
+
+function largeBleFragmentAllowed() {
+  return Boolean(forceLargeFragmentInput?.checked);
 }
 
 function readPipelineWindow() {

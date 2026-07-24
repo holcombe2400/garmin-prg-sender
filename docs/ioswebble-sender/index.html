@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG Bluetooth Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260724-bluefy-mlr-serialized">
+    <link rel="stylesheet" href="./styles.css?v=20260724-bluefy-frag20-guard">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260724-bluefy-mlr-serialized"></script>
+    <script type="module" src="./app.js?v=20260724-bluefy-frag20-guard"></script>
   </head>
   <body>
     <main class="app">
@@ -151,6 +151,10 @@
         <label class="toggle-row">
           <input id="reliableMlrInput" type="checkbox">
           <span>Try reliable MLR transport on next connect</span>
+        </label>
+        <label class="toggle-row">
+          <input id="forceLargeFragmentInput" type="checkbox">
+          <span>Force BLE fragments above 20 for experiments</span>
         </label>
         <div id="foregroundWarning" class="meta">Keep Bluefy open in the foreground until upload reaches 100%.</div>
         <div class="row send-actions">
