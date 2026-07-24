@@ -4,7 +4,8 @@ const PRG_SUBTYPE = 17;
 const MAX_EXPECTED_PRG_SIZE = 10 * 1024 * 1024;
 const LARGE_PRG_WARNING_SIZE = 4 * 1024 * 1024;
 const SAFE_GFDI_PACKET_SIZE = 375;
-const MAX_EXPERIMENTAL_GFDI_PACKET_SIZE = 1500;
+const MAX_EXPERIMENTAL_GFDI_PACKET_SIZE = 8192;
+const LARGE_GFDI_PACKET_SIZE = 1500;
 const SAFE_BLE_FRAGMENT_SIZE = 20;
 const TRUSTED_DEVICE_KEY = "garminPrgSender.trustedDevice";
 const SAVED_PRG_DB_NAME = "garminPrgSender.savedPrgs";
@@ -1063,6 +1064,9 @@ async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt, sig
   }
   if (settings.maxPacketSize > SAFE_GFDI_PACKET_SIZE) {
     log(`Experimental GFDI packet size ${settings.maxPacketSize}. If this stalls or fails, retry with ${SAFE_GFDI_PACKET_SIZE}.`);
+  }
+  if (settings.maxPacketSize > LARGE_GFDI_PACKET_SIZE) {
+    log("Large GFDI packets are probing the watch/MLR breaking point. Stop + Retry is expected if the watch stops ACKing.");
   }
   if (settings.pipelineWindow > 1) {
     log(`Experimental pipeline window ${settings.pipelineWindow}. If upload fails, retry with Pipeline chunks 1.`);
@@ -2652,6 +2656,14 @@ function applyTransportSettings(transport, settings) {
 }
 
 function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set()) {
+  const largeGfdiProfiles = shouldProbeLargeGfdi(baseSettings) ? [
+    { maxPacketSize: 1500, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "MLR probe 1500/20/2/0" },
+    { maxPacketSize: 2048, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "MLR probe 2048/20/2/0" },
+    { maxPacketSize: 3072, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "MLR probe 3072/20/2/0" },
+    { maxPacketSize: 4096, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "MLR probe 4096/20/2/0" },
+    { maxPacketSize: 6144, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "MLR probe 6144/20/2/0" },
+    { maxPacketSize: 8192, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "MLR probe 8192/20/2/0" }
+  ] : [];
   const stableProfiles = [
     { maxPacketSize: 375, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 1, writeDelayMs: 0, label: "375/20/1/0" },
     { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 1, writeDelayMs: 0, label: "400/20/1/0" },
@@ -2668,11 +2680,17 @@ function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set
     { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 4, writeDelayMs: 15, label: "risky 400/20/4/15" }
   ] : [];
   const profiles = riskyPipelineInput?.checked
-    ? [...riskyProfiles, FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
-    : [FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
+    ? [...largeGfdiProfiles, ...riskyProfiles, FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
+    : [...largeGfdiProfiles, FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
   return uniqueBenchmarkProfiles(profiles
     .filter((profile) => fileSize >= Math.max(1024, profile.maxPacketSize * profile.pipelineWindow))
     .filter((profile) => !failedProfiles.has(benchmarkProfileKey(profile))));
+}
+
+function shouldProbeLargeGfdi(baseSettings) {
+  return Boolean(reliableMlrInput?.checked)
+    || String(connection?.kind || "").includes("reliable MLR")
+    || Number(baseSettings.maxPacketSize) >= LARGE_GFDI_PACKET_SIZE;
 }
 
 function benchmarkProfileKey(profile) {
