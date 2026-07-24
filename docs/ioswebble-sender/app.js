@@ -107,6 +107,7 @@ const logEl = document.querySelector("#log");
 const detailsButton = document.querySelector("#detailsButton");
 const packetSizeInput = document.querySelector("#packetSizeInput");
 const fragmentSizeInput = document.querySelector("#fragmentSizeInput");
+const pipelineWindowInput = document.querySelector("#pipelineWindowInput");
 const writeDelayInput = document.querySelector("#writeDelayInput");
 const keepAwakeInput = document.querySelector("#keepAwakeInput");
 const foregroundWarning = document.querySelector("#foregroundWarning");
@@ -791,13 +792,18 @@ async function sendPrg() {
     let uploadStats = null;
     const maxPacketSize = readGfdiPacketSize();
     const fragmentSize = readNumber(fragmentSizeInput, 20);
+    const pipelineWindow = readPipelineWindow();
     const writeDelayMs = readNumber(writeDelayInput, 0);
-    log(`Upload settings: GFDI packet ${maxPacketSize}, BLE fragment ${fragmentSize}, write delay ${writeDelayMs} ms.`);
+    log(`Upload settings: GFDI packet ${maxPacketSize}, BLE fragment ${fragmentSize}, pipeline ${pipelineWindow}, write delay ${writeDelayMs} ms.`);
     if (maxPacketSize > SAFE_GFDI_PACKET_SIZE) {
       log(`Experimental GFDI packet size ${maxPacketSize}. If this stalls or fails, retry with ${SAFE_GFDI_PACKET_SIZE}.`);
     }
+    if (pipelineWindow > 1) {
+      log(`Experimental pipeline window ${pipelineWindow}. If upload fails, retry with Pipeline chunks 1.`);
+    }
     await uploadPrg(selectedFile.data, connection, {
       maxPacketSize,
+      pipelineWindow,
       timeoutMs: 30000,
       maxRetries: 5,
       onProgress: ({ offset, total }) => {
@@ -1046,6 +1052,7 @@ async function uploadPrg(data, transport, options) {
   const timeoutMs = options.timeoutMs ?? 30000;
   const maxRetries = options.maxRetries ?? 5;
   const maxPacketSize = clampNumber(options.maxPacketSize, 64, MAX_EXPERIMENTAL_GFDI_PACKET_SIZE, SAFE_GFDI_PACKET_SIZE);
+  const pipelineWindow = clampNumber(options.pipelineWindow, 1, 8, 1);
 
   log("Sending SYNC_READY.");
   await sendSystemEvent(transport, buildSyncReady(), timeoutMs);
@@ -1078,6 +1085,18 @@ async function uploadPrg(data, transport, options) {
   const chunker = new UploadChunker(data, maxPacketSize, uploadStatus.dataOffset, initialCrc);
   options.onProgress?.({ offset: uploadStatus.dataOffset, total: data.length });
 
+  if (pipelineWindow <= 1) {
+    await uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRetries, options);
+  } else {
+    await uploadPipelinedChunks(data, transport, chunker, timeoutMs, pipelineWindow, options);
+  }
+
+  log("Sending SYNC_COMPLETE.");
+  await sendSystemEvent(transport, buildSyncComplete(), timeoutMs);
+  await sleep(2000);
+}
+
+async function uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRetries, options) {
   let retries = 0;
   while (true) {
     const chunk = chunker.nextChunk();
@@ -1109,10 +1128,31 @@ async function uploadPrg(data, transport, options) {
     retries = 0;
     options.onProgress?.({ offset: transferStatus.dataOffset, total: data.length });
   }
+}
 
-  log("Sending SYNC_COMPLETE.");
-  await sendSystemEvent(transport, buildSyncComplete(), timeoutMs);
-  await sleep(2000);
+async function uploadPipelinedChunks(data, transport, chunker, timeoutMs, pipelineWindow, options) {
+  while (true) {
+    const batch = [];
+    for (let index = 0; index < pipelineWindow; index += 1) {
+      const chunk = chunker.nextChunk();
+      if (!chunk) break;
+      await transport.sendGfdi(buildFileTransferData(chunk.data, chunk.offset, chunk.runningCrc));
+      batch.push(chunk);
+    }
+    if (!batch.length) break;
+
+    for (const chunk of batch) {
+      const transferStatus = await receiveKind(transport, "fileTransferData", timeoutMs);
+      const expectedOffset = chunk.offset + chunk.data.length;
+      if (transferStatus.status !== Status.ACK || transferStatus.transferStatus !== TransferStatus.OK) {
+        throw new Error(`Pipelined file chunk failed at offset ${chunk.offset}; retry with Pipeline chunks 1. Status: ${JSON.stringify(transferStatus)}`);
+      }
+      if (transferStatus.dataOffset !== expectedOffset) {
+        throw new Error(`Pipelined upload lost alignment at offset ${chunk.offset}; watch acknowledged ${transferStatus.dataOffset}, expected ${expectedOffset}. Retry with Pipeline chunks 1.`);
+      }
+      options.onProgress?.({ offset: transferStatus.dataOffset, total: data.length });
+    }
+  }
 }
 
 async function sendSystemEvent(transport, packet, timeoutMs) {
@@ -2049,6 +2089,13 @@ function readNumber(input, fallback) {
 function readGfdiPacketSize() {
   const value = clampNumber(packetSizeInput.value, 64, MAX_EXPERIMENTAL_GFDI_PACKET_SIZE, SAFE_GFDI_PACKET_SIZE);
   packetSizeInput.value = String(value);
+  return value;
+}
+
+function readPipelineWindow() {
+  if (!pipelineWindowInput) return 1;
+  const value = clampNumber(pipelineWindowInput.value, 1, 8, 1);
+  pipelineWindowInput.value = String(value);
   return value;
 }
 

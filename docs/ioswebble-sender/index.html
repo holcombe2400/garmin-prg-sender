@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG WebBLE Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260724-large-gfdi">
+    <link rel="stylesheet" href="./styles.css?v=20260724-pipeline-window">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260724-large-gfdi"></script>
+    <script type="module" src="./app.js?v=20260724-pipeline-window"></script>
   </head>
   <body>
     <main class="app">
@@ -118,6 +118,10 @@
           <label>
             <span>BLE fragment</span>
             <input id="fragmentSizeInput" type="number" min="20" max="180" step="1" value="20">
+          </label>
+          <label>
+            <span>Pipeline chunks</span>
+            <input id="pipelineWindowInput" type="number" min="1" max="8" step="1" value="1">
           </label>
           <label>
             <span>Write delay ms</span>
