@@ -39,7 +39,7 @@ const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 24;
 const WIFI_PROBE_TIMEOUT_MS = 3500;
 const WIFI_MAX_PORTS = 12;
-const PROTOCOL_TRACE_VERSION = "20260724-trace-export";
+const PROTOCOL_TRACE_VERSION = "20260724-trace-share";
 const TRACE_HEX_PREVIEW_BYTES = 48;
 const MAX_PROTOCOL_TRACE_EVENTS = 6000;
 const MLR_FLAG_MASK = 0x80;
@@ -159,8 +159,11 @@ const logEl = document.querySelector("#log");
 const detailsButton = document.querySelector("#detailsButton");
 const protocolTraceInput = document.querySelector("#protocolTraceInput");
 const exportTraceButton = document.querySelector("#exportTraceButton");
+const shareTraceButton = document.querySelector("#shareTraceButton");
+const copyTraceButton = document.querySelector("#copyTraceButton");
 const clearTraceButton = document.querySelector("#clearTraceButton");
 const traceMeta = document.querySelector("#traceMeta");
+const traceText = document.querySelector("#traceText");
 const packetSizeInput = document.querySelector("#packetSizeInput");
 const fragmentSizeInput = document.querySelector("#fragmentSizeInput");
 const pipelineWindowInput = document.querySelector("#pipelineWindowInput");
@@ -218,6 +221,8 @@ async function init() {
     updateTraceMeta(true);
   });
   exportTraceButton?.addEventListener("click", exportProtocolTrace);
+  shareTraceButton?.addEventListener("click", () => shareProtocolTrace().catch((error) => showError("Share trace failed", error)));
+  copyTraceButton?.addEventListener("click", () => copyProtocolTrace().catch((error) => showError("Copy trace failed", error)));
   clearTraceButton?.addEventListener("click", clearProtocolTrace);
   fileInput.addEventListener("change", onFileSelected);
   githubRepoInput.value = loadGithubRepoSetting();
@@ -2169,11 +2174,13 @@ function updateTraceMeta(forceButtons = false) {
   if (traceMeta) {
     const state = protocolTraceInput?.checked ? "on" : "off";
     traceMeta.textContent = protocolTrace.length
-      ? `${protocolTrace.length} trace event(s), capture ${state}. Export after a stalled or completed run.`
+      ? `${protocolTrace.length} trace event(s), capture ${state}. Use Share Trace on iPhone if Export does not appear in Files.`
       : `No protocol trace captured; capture ${state}.`;
   }
   if (forceButtons || protocolTrace.length <= 1 || protocolTrace.length % 25 === 0) {
     if (exportTraceButton) exportTraceButton.disabled = protocolTrace.length === 0;
+    if (shareTraceButton) shareTraceButton.disabled = protocolTrace.length === 0;
+    if (copyTraceButton) copyTraceButton.disabled = protocolTrace.length === 0;
     if (clearTraceButton) clearTraceButton.disabled = protocolTrace.length === 0;
   }
 }
@@ -2181,12 +2188,76 @@ function updateTraceMeta(forceButtons = false) {
 function clearProtocolTrace() {
   protocolTrace = [];
   protocolTraceSequence = 0;
+  if (traceText) {
+    traceText.value = "";
+    traceText.hidden = true;
+  }
   updateTraceMeta(true);
   log("Garmin protocol trace cleared.");
 }
 
 function exportProtocolTrace() {
   if (!protocolTrace.length) return;
+  const { json, blob, filename } = buildProtocolTraceExport();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  showTraceJson(json, false);
+  log(`Exported Garmin protocol trace with ${protocolTrace.length} event(s). If no file appears in Files, tap Share Trace or Copy Trace.`);
+}
+
+async function shareProtocolTrace() {
+  if (!protocolTrace.length) return;
+  const { json, blob, filename } = buildProtocolTraceExport();
+  if (typeof File !== "undefined" && navigator.share) {
+    const file = new File([blob], filename, { type: "application/json" });
+    try {
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: "Garmin protocol trace",
+          text: "Garmin PRG sender protocol trace JSON"
+        });
+        log(`Shared Garmin protocol trace file with ${protocolTrace.length} event(s).`);
+        return;
+      }
+    } catch (error) {
+      log(`Trace file share was not accepted: ${messageOf(error)}`);
+    }
+  }
+  if (navigator.share) {
+    try {
+      await navigator.share({
+        title: "Garmin protocol trace JSON",
+        text: json
+      });
+      log(`Shared Garmin protocol trace text with ${protocolTrace.length} event(s).`);
+      return;
+    } catch (error) {
+      log(`Trace text share was not accepted: ${messageOf(error)}`);
+    }
+  }
+  showTraceJson(json, true);
+  log("Share sheet is not available here. Trace JSON is shown below for manual copy.");
+}
+
+async function copyProtocolTrace() {
+  if (!protocolTrace.length) return;
+  const { json } = buildProtocolTraceExport();
+  showTraceJson(json, true);
+  if (!navigator.clipboard?.writeText) {
+    throw new Error("Clipboard API is not available. Select the trace text box and copy manually.");
+  }
+  await navigator.clipboard.writeText(json);
+  log(`Copied Garmin protocol trace JSON with ${protocolTrace.length} event(s).`);
+}
+
+function buildProtocolTraceExport() {
   const payload = {
     version: PROTOCOL_TRACE_VERSION,
     exportedAt: new Date().toISOString(),
@@ -2205,17 +2276,24 @@ function exportProtocolTrace() {
     settings: currentTransferSettingsForTrace(),
     events: protocolTrace
   };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
+  const json = JSON.stringify(payload, null, 2);
   const stem = sanitizeFileStem(selectedFile?.name || selectedDevice?.name || "garmin-prg");
-  anchor.href = url;
-  anchor.download = `${stem}-protocol-trace-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 30000);
-  log(`Exported Garmin protocol trace with ${protocolTrace.length} event(s).`);
+  const filename = `${stem}-protocol-trace-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+  return {
+    json,
+    blob: new Blob([json], { type: "application/json" }),
+    filename
+  };
+}
+
+function showTraceJson(json, reveal) {
+  if (!traceText) return;
+  traceText.value = json;
+  traceText.hidden = !reveal;
+  if (reveal) {
+    traceText.focus();
+    traceText.setSelectionRange?.(0, 0);
+  }
 }
 
 function currentTransferSettingsForTrace() {
@@ -3402,6 +3480,8 @@ function updateButtons() {
   if (stopUploadButton) stopUploadButton.disabled = !isUploading;
   if (autoTuneButton) autoTuneButton.disabled = isBusy || isScanning;
   if (exportTraceButton) exportTraceButton.disabled = protocolTrace.length === 0;
+  if (shareTraceButton) shareTraceButton.disabled = protocolTrace.length === 0;
+  if (copyTraceButton) copyTraceButton.disabled = protocolTrace.length === 0;
   if (clearTraceButton) clearTraceButton.disabled = protocolTrace.length === 0;
 }
 
