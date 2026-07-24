@@ -39,7 +39,7 @@ const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 24;
 const WIFI_PROBE_TIMEOUT_MS = 3500;
 const WIFI_MAX_PORTS = 12;
-const PROTOCOL_TRACE_VERSION = "20260724-api-fallback";
+const PROTOCOL_TRACE_VERSION = "20260725-v2-pair";
 const TRACE_HEX_PREVIEW_BYTES = 48;
 const MAX_PROTOCOL_TRACE_EVENTS = 6000;
 const MLR_FLAG_MASK = 0x80;
@@ -165,6 +165,7 @@ const clearTraceButton = document.querySelector("#clearTraceButton");
 const traceMeta = document.querySelector("#traceMeta");
 const traceText = document.querySelector("#traceText");
 const packetSizeInput = document.querySelector("#packetSizeInput");
+const v2PairInput = document.querySelector("#v2PairInput");
 const fragmentSizeInput = document.querySelector("#fragmentSizeInput");
 const pipelineWindowInput = document.querySelector("#pipelineWindowInput");
 const writeDelayInput = document.querySelector("#writeDelayInput");
@@ -1008,6 +1009,7 @@ async function connectWatch() {
     setBusy(true);
     setStatus("Connecting...");
     connection = await connectGarminTransport(selectedDevice, {
+      v2PairShortValue: readV2PairShortValue(),
       writeFragmentSize: readBleFragmentSize(),
       writeDelayMs: readNumber(writeDelayInput, 0),
       reliableMlr: Boolean(reliableMlrInput?.checked)
@@ -1104,7 +1106,7 @@ async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt, sig
     log(`Benchmark Send attempt ${attempt}: trying ${settings.label}; ${candidates.length - 1} fallback profile(s) remain.`);
   }
   applyTransportSettings(connection, settings);
-  log(`Upload attempt ${attempt}. Settings: GFDI packet ${settings.maxPacketSize}, BLE fragment ${settings.fragmentSize}, pipeline ${settings.pipelineWindow}, write delay ${settings.writeDelayMs} ms.`);
+  log(`Upload attempt ${attempt}. Settings: v2 pair ${v2PairLabel(settings.v2PairShortValue)}, GFDI packet ${settings.maxPacketSize}, BLE fragment ${settings.fragmentSize}, pipeline ${settings.pipelineWindow}, write delay ${settings.writeDelayMs} ms.`);
   if (benchmark) {
     log("Benchmark Send now tests one profile for the whole upload. Failed profiles reconnect and restart from zero with the next profile.");
     if (riskyPipelineInput?.checked) log("Risky pipeline profiles are enabled; failed profiles will trigger reconnect/retry.");
@@ -1221,6 +1223,7 @@ async function reconnectForRetry(settings, reason) {
   updateButtons();
   await sleep(1500);
   connection = await connectGarminTransport(selectedDevice, {
+    v2PairShortValue: settings.v2PairShortValue ?? readV2PairShortValue(),
     writeFragmentSize: settings.fragmentSize,
     writeDelayMs: settings.writeDelayMs,
     reliableMlr: Boolean(reliableMlrInput?.checked)
@@ -1325,13 +1328,17 @@ function formatOptionalNumber(value) {
 
 async function tryV2Transport(server, options) {
   const service = await server.getPrimaryService(UUIDS.v2Service);
-  for (let value = 0x2810; value < 0x2815; value += 1) {
+  const pairValues = v2PairProbeValues(options.v2PairShortValue);
+  if (options.v2PairShortValue) {
+    log(`Trying selected Garmin v2 pair ${gfdiUuid(options.v2PairShortValue)}/${gfdiUuid(options.v2PairShortValue + 0x10)}.`);
+  }
+  for (const value of pairValues) {
     const receiveUuid = gfdiUuid(value);
     const sendUuid = gfdiUuid(value + 0x10);
     try {
       const receive = await service.getCharacteristic(receiveUuid);
       const send = await service.getCharacteristic(sendUuid);
-      const transport = new V2Transport(receive, send, options);
+      const transport = new V2Transport(receive, send, { ...options, v2PairShortValue: value });
       await transport.initialize();
       return transport;
     } catch (error) {
@@ -1339,6 +1346,11 @@ async function tryV2Transport(server, options) {
     }
   }
   return null;
+}
+
+function v2PairProbeValues(selectedValue) {
+  if (selectedValue) return [selectedValue];
+  return [0x2810, 0x2811, 0x2812, 0x2813, 0x2814];
 }
 
 async function tryKnownPair(server, serviceUuid, receiveUuid, sendUuid, kind, options) {
@@ -1474,7 +1486,12 @@ class V1Transport extends BaseTransport {
 
 class V2Transport extends BaseTransport {
   constructor(receive, send, options) {
-    super(receive, send, "v2", options);
+    const v2PairShortValue = options.v2PairShortValue || 0x2810;
+    const v2PairName = `${v2PairShortValue.toString(16)}/${(v2PairShortValue + 0x10).toString(16)}`;
+    const pairName = `v2 ${v2PairName}`;
+    super(receive, send, pairName, options);
+    this.v2PairShortValue = v2PairShortValue;
+    this.v2PairName = v2PairName;
     this.gfdiHandle = null;
     this.reliableMlrRequested = Boolean(options.reliableMlr);
     this.mlr = null;
@@ -1548,7 +1565,7 @@ class V2Transport extends BaseTransport {
       this.gfdiHandle = handle;
       if (reliable) {
         this.mlr = new MlrSession(this, handle);
-        this.kind = "v2 reliable MLR";
+        this.kind = `v2 reliable MLR ${this.v2PairName}`;
         log(`Garmin GFDI registered in reliable MLR mode; handle=${handle}.`);
       } else if (this.reliableMlrRequested) {
         log("Watch accepted GFDI but did not enable reliable MLR; using regular v2 ML.");
@@ -2355,6 +2372,7 @@ function currentTransferSettingsForTrace() {
     apiMode: apiModeInput?.value || "",
     pickerMode: pickerModeInput?.value || "",
     accessMode: serviceModeInput?.value || "",
+    v2Pair: v2PairLabel(readV2PairShortValue()),
     gfdiPacket: Number(packetSizeInput?.value || 0),
     bleFragment: Number(fragmentSizeInput?.value || 0),
     pipeline: Number(pipelineWindowInput?.value || 0),
@@ -3237,6 +3255,7 @@ function clearRetryState() {
 
 function currentUploadSettings() {
   return {
+    v2PairShortValue: readV2PairShortValue(),
     maxPacketSize: readGfdiPacketSize(),
     fragmentSize: readBleFragmentSize(),
     pipelineWindow: readPipelineWindow(),
@@ -3611,6 +3630,20 @@ function readGfdiPacketSize() {
   const value = clampNumber(packetSizeInput.value, 64, MAX_EXPERIMENTAL_GFDI_PACKET_SIZE, SAFE_GFDI_PACKET_SIZE);
   packetSizeInput.value = String(value);
   return value;
+}
+
+function readV2PairShortValue() {
+  const value = String(v2PairInput?.value || "auto").trim().toLowerCase();
+  if (value === "auto" || !value) return null;
+  const number = Number.parseInt(value, 16);
+  if (Number.isFinite(number) && number >= 0x2810 && number <= 0x2814) return number;
+  if (v2PairInput) v2PairInput.value = "auto";
+  return null;
+}
+
+function v2PairLabel(shortValue) {
+  if (!shortValue) return "auto";
+  return `${shortValue.toString(16)}/${(shortValue + 0x10).toString(16)}`;
 }
 
 function readBleFragmentSize() {

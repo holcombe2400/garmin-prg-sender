@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG Bluetooth Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260724-api-fallback">
+    <link rel="stylesheet" href="./styles.css?v=20260725-v2-pair">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260724-api-fallback"></script>
+    <script type="module" src="./app.js?v=20260725-v2-pair"></script>
   </head>
   <body>
     <main class="app">
@@ -125,6 +125,17 @@
 
       <section class="panel">
         <div class="settings">
+          <label>
+            <span>Garmin v2 pair</span>
+            <select id="v2PairInput">
+              <option value="auto" selected>Auto first available</option>
+              <option value="2810">Pair 0: 2810/2820</option>
+              <option value="2811">Pair 1: 2811/2821</option>
+              <option value="2812">Pair 2: 2812/2822</option>
+              <option value="2813">Pair 3: 2813/2823</option>
+              <option value="2814">Pair 4: 2814/2824</option>
+            </select>
+          </label>
           <label>
             <span>GFDI packet</span>
             <input id="packetSizeInput" type="number" min="64" max="8192" step="1" value="400">
