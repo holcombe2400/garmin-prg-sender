@@ -2683,6 +2683,7 @@ function applyTransportSettings(transport, settings) {
 }
 
 function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set()) {
+  const fragmentProfiles = buildFragmentProbeProfiles(baseSettings);
   const largeGfdiProfiles = shouldProbeLargeGfdi(baseSettings) ? [
     { maxPacketSize: 1500, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 1500/20/8/0" },
     { maxPacketSize: 2048, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 2048/20/8/0" },
@@ -2710,11 +2711,31 @@ function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set
     { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 4, writeDelayMs: 15, label: "risky 400/20/4/15" }
   ] : [];
   const profiles = riskyPipelineInput?.checked
-    ? [...largeGfdiProfiles, ...riskyProfiles, FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
-    : [...largeGfdiProfiles, FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
+    ? [...fragmentProfiles, ...largeGfdiProfiles, ...riskyProfiles, FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
+    : [...fragmentProfiles, ...largeGfdiProfiles, FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
   return uniqueBenchmarkProfiles(profiles
     .filter((profile) => fileSize >= Math.max(1024, profile.maxPacketSize * profile.pipelineWindow))
     .filter((profile) => !failedProfiles.has(benchmarkProfileKey(profile))));
+}
+
+function buildFragmentProbeProfiles(baseSettings) {
+  const selectedFragment = clampNumber(baseSettings.fragmentSize, SAFE_BLE_FRAGMENT_SIZE, MAX_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
+  if (selectedFragment <= SAFE_BLE_FRAGMENT_SIZE) return [];
+  const sizes = uniqueNumbers([
+    selectedFragment,
+    MAX_BLE_FRAGMENT_SIZE,
+    160,
+    120,
+    80,
+    60,
+    40,
+    SAFE_BLE_FRAGMENT_SIZE
+  ]).filter((size) => size >= SAFE_BLE_FRAGMENT_SIZE && size <= MAX_BLE_FRAGMENT_SIZE);
+  return sizes.map((fragmentSize) => ({
+    ...baseSettings,
+    fragmentSize,
+    label: `fragment probe ${baseSettings.maxPacketSize}/${fragmentSize}/${baseSettings.pipelineWindow}/${baseSettings.writeDelayMs}`
+  }));
 }
 
 function shouldProbeLargeGfdi(baseSettings) {
@@ -2729,6 +2750,18 @@ function shouldUseMlrTuning() {
 
 function benchmarkProfileKey(profile) {
   return `${profile.maxPacketSize}/${profile.fragmentSize}/${profile.pipelineWindow}/${profile.writeDelayMs}`;
+}
+
+function uniqueNumbers(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || seen.has(number)) continue;
+    seen.add(number);
+    result.push(number);
+  }
+  return result;
 }
 
 function uniqueBenchmarkProfiles(profiles) {
