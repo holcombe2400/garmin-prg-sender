@@ -25,7 +25,7 @@ const BENCHMARK_MIN_BYTES = 12 * 1024;
 const BENCHMARK_MAX_BYTES = 24 * 1024;
 const BENCHMARK_PROFILE_TIMEOUT_MS = 18000;
 const GFDI_WRITE_TIMEOUT_MS = 10000;
-const MAX_BENCHMARK_RESTARTS = 3;
+const MAX_BENCHMARK_RESTARTS = 6;
 
 const GADGETBRIDGE_CLIENT_ID = 2;
 const REQUEST_REGISTER_ML = 0;
@@ -835,12 +835,19 @@ async function sendPrg({ benchmark = false } = {}) {
 async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt }) {
   setProgress(0, 0, selectedFile.size);
   let uploadStats = null;
-  const settings = currentUploadSettings();
+  const baseSettings = currentUploadSettings();
+  let settings = baseSettings;
+  if (benchmark) {
+    const candidates = buildBenchmarkProfiles(baseSettings, selectedFile.size, failedBenchmarkProfiles);
+    if (!candidates.length) throw new Error("No benchmark profiles remain to try.");
+    settings = candidates[0];
+    applyTuningSettings(settings);
+    log(`Benchmark Send attempt ${attempt}: trying ${settings.label}; ${candidates.length - 1} fallback profile(s) remain.`);
+  }
   applyTransportSettings(connection, settings);
-  const benchmarkProfiles = benchmark ? buildBenchmarkProfiles(settings, selectedFile.size, failedBenchmarkProfiles) : null;
   log(`Upload attempt ${attempt}. Settings: GFDI packet ${settings.maxPacketSize}, BLE fragment ${settings.fragmentSize}, pipeline ${settings.pipelineWindow}, write delay ${settings.writeDelayMs} ms.`);
-  if (benchmarkProfiles) {
-    log(`Benchmark Send enabled. Testing ${benchmarkProfiles.length} setting profile(s), then finishing with the fastest stable result.`);
+  if (benchmark) {
+    log("Benchmark Send now tests one profile for the whole upload. Failed profiles reconnect and restart from zero with the next profile.");
     if (riskyPipelineInput?.checked) log("Risky pipeline profiles are enabled; failed profiles will trigger reconnect/retry.");
   }
   if (settings.maxPacketSize > SAFE_GFDI_PACKET_SIZE) {
@@ -849,23 +856,21 @@ async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt }) {
   if (settings.pipelineWindow > 1) {
     log(`Experimental pipeline window ${settings.pipelineWindow}. If upload fails, retry with Pipeline chunks 1.`);
   }
-  await uploadPrg(selectedFile.data, connection, {
-    ...settings,
-    benchmarkProfiles,
-    timeoutMs: 30000,
-    maxRetries: 5,
-    onBenchmarkProfile: (result) => {
-      log(`Benchmark ${result.label}: ${formatRate(result.avgBps)} over ${formatBytes(result.bytes)}.`);
-    },
-    onBenchmarkSelected: (result) => {
-      applyTuningSettings(result);
-      log(`Benchmark selected ${result.label}: ${formatRate(result.avgBps)}.`);
-    },
-    onProgress: ({ offset, total }) => {
-      if (!uploadStats) uploadStats = createTransferStats(total);
-      setProgress(Math.floor((100 * offset) / total), offset, total, uploadStats);
-    }
-  });
+  try {
+    await uploadPrg(selectedFile.data, connection, {
+      ...settings,
+      benchmarkProfiles: null,
+      timeoutMs: 30000,
+      maxRetries: 5,
+      onProgress: ({ offset, total }) => {
+        if (!uploadStats) uploadStats = createTransferStats(total);
+        setProgress(Math.floor((100 * offset) / total), offset, total, uploadStats);
+      }
+    });
+  } catch (error) {
+    if (benchmark) throw benchmarkProfileFailure(settings, error);
+    throw error;
+  }
   setProgress(100, selectedFile.size, selectedFile.size, uploadStats);
   const transferMetrics = uploadStats ? completedTransferMetrics(uploadStats, selectedFile.size) : null;
   const transferSummary = transferMetrics ? transferSummaryText(transferMetrics) : "";
@@ -2149,10 +2154,12 @@ function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set
     { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 4, writeDelayMs: 10, label: "risky 400/180/4/10" },
     { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 4, writeDelayMs: 15, label: "risky 400/180/4/15" }
   ] : [];
-  const profiles = [FAST_FENIX6_TUNING, ...stableProfiles, baseSettings, ...riskyProfiles]
+  const profiles = riskyPipelineInput?.checked
+    ? [...riskyProfiles, FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
+    : [FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
+  return uniqueBenchmarkProfiles(profiles
     .filter((profile) => fileSize >= Math.max(1024, profile.maxPacketSize * profile.pipelineWindow))
-    .filter((profile) => !failedProfiles.has(benchmarkProfileKey(profile)));
-  return uniqueBenchmarkProfiles(profiles);
+    .filter((profile) => !failedProfiles.has(benchmarkProfileKey(profile))));
 }
 
 function benchmarkProfileKey(profile) {
