@@ -1030,6 +1030,12 @@ async function sendPrg({ benchmark = false, retry = false } = {}) {
       } catch (error) {
         if (benchmark && error?.benchmarkProfile) {
           failedBenchmarkProfiles.add(benchmarkProfileKey(error.benchmarkProfile));
+          if (shouldSkipLargeFragmentProfiles(error)) {
+            const skipped = markLargeFragmentProfilesFailed(error.benchmarkProfile, failedBenchmarkProfiles);
+            if (skipped > 0) {
+              log(`Large BLE fragment failed at ${error.benchmarkProfile.fragmentSize}; skipping ${skipped} larger-than-20 fragment profile(s) for this benchmark run.`);
+            }
+          }
           rememberUploadRequest(benchmark, failedBenchmarkProfiles);
         }
         if (!benchmark || !error?.benchmarkProfile || attempt >= maxAttempts) throw error;
@@ -2778,7 +2784,16 @@ function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set
 function buildFragmentProbeProfiles(baseSettings) {
   const selectedFragment = clampNumber(baseSettings.fragmentSize, SAFE_BLE_FRAGMENT_SIZE, MAX_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
   if (selectedFragment <= SAFE_BLE_FRAGMENT_SIZE) return [];
-  const sizes = uniqueNumbers([
+  const sizes = fragmentProbeSizes(selectedFragment);
+  return sizes.map((fragmentSize) => ({
+    ...baseSettings,
+    fragmentSize,
+    label: `fragment probe ${baseSettings.maxPacketSize}/${fragmentSize}/${baseSettings.pipelineWindow}/${baseSettings.writeDelayMs}`
+  }));
+}
+
+function fragmentProbeSizes(selectedFragment) {
+  return uniqueNumbers([
     selectedFragment,
     MAX_BLE_FRAGMENT_SIZE,
     160,
@@ -2788,11 +2803,23 @@ function buildFragmentProbeProfiles(baseSettings) {
     40,
     SAFE_BLE_FRAGMENT_SIZE
   ]).filter((size) => size >= SAFE_BLE_FRAGMENT_SIZE && size <= MAX_BLE_FRAGMENT_SIZE);
-  return sizes.map((fragmentSize) => ({
-    ...baseSettings,
-    fragmentSize,
-    label: `fragment probe ${baseSettings.maxPacketSize}/${fragmentSize}/${baseSettings.pipelineWindow}/${baseSettings.writeDelayMs}`
-  }));
+}
+
+function shouldSkipLargeFragmentProfiles(error) {
+  const profile = error?.benchmarkProfile;
+  return profile?.fragmentSize > SAFE_BLE_FRAGMENT_SIZE
+    && messageOf(error.cause || error).includes("MLR retransmission limit reached with BLE fragment");
+}
+
+function markLargeFragmentProfilesFailed(profile, failedProfiles) {
+  let skipped = 0;
+  for (const fragmentSize of fragmentProbeSizes(profile.fragmentSize)) {
+    if (fragmentSize <= SAFE_BLE_FRAGMENT_SIZE) continue;
+    const key = benchmarkProfileKey({ ...profile, fragmentSize });
+    if (!failedProfiles.has(key)) skipped += 1;
+    failedProfiles.add(key);
+  }
+  return skipped;
 }
 
 function shouldProbeLargeGfdi(baseSettings) {
