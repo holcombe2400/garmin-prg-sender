@@ -23,6 +23,8 @@ const FAST_FENIX6_TUNING = Object.freeze({
 });
 const BENCHMARK_MIN_BYTES = 12 * 1024;
 const BENCHMARK_MAX_BYTES = 24 * 1024;
+const BENCHMARK_PROFILE_TIMEOUT_MS = 18000;
+const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 3;
 
 const GADGETBRIDGE_CLIENT_ID = 2;
@@ -1133,7 +1135,7 @@ async function uploadPrg(data, transport, options) {
   await sendSystemEvent(transport, buildSyncReady(), timeoutMs);
 
   log(`Creating PRG file slot (${data.length} bytes).`);
-  await transport.sendGfdi(buildCreateFile(data.length));
+  await sendGfdiChecked(transport, buildCreateFile(data.length), "CREATE_FILE");
   const createStatus = await receiveKind(transport, "createFile", timeoutMs);
   if (createStatus.status !== Status.ACK || createStatus.createStatus !== CreateStatus.OK) {
     throw new Error(describeCreateFileFailure(createStatus, data.length));
@@ -1144,7 +1146,7 @@ async function uploadPrg(data, transport, options) {
   options.onProgress?.({ offset: 0, total: data.length });
 
   log(`Starting upload to file index ${createStatus.fileIndex}.`);
-  await transport.sendGfdi(buildUploadRequest(createStatus.fileIndex, data.length));
+  await sendGfdiChecked(transport, buildUploadRequest(createStatus.fileIndex, data.length), "UPLOAD_REQUEST");
   const uploadStatus = await receiveKind(transport, "uploadRequest", timeoutMs);
   if (uploadStatus.status !== Status.ACK || uploadStatus.uploadStatus !== UploadStatus.OK) {
     throw new Error(`Upload request failed: ${JSON.stringify(uploadStatus)}`);
@@ -1191,11 +1193,13 @@ async function uploadBenchmarkProfiles(data, transport, chunker, timeoutMs, maxR
     const startedAt = performance.now();
     log(`Benchmarking ${profile.label}: ${formatBytes(stopOffset - startOffset)}.`);
     try {
-      if (profile.pipelineWindow <= 1) {
-        await uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRetries, options, stopOffset);
-      } else {
-        await uploadPipelinedChunks(data, transport, chunker, timeoutMs, profile.pipelineWindow, options, stopOffset);
-      }
+      await withTimeout(
+        profile.pipelineWindow <= 1
+          ? uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRetries, options, stopOffset)
+          : uploadPipelinedChunks(data, transport, chunker, timeoutMs, profile.pipelineWindow, options, stopOffset),
+        BENCHMARK_PROFILE_TIMEOUT_MS,
+        `Benchmark profile timed out after ${Math.round(BENCHMARK_PROFILE_TIMEOUT_MS / 1000)}s`
+      );
     } catch (error) {
       throw benchmarkProfileFailure(profile, error);
     }
@@ -1238,7 +1242,7 @@ async function uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRe
     const chunk = chunker.nextChunk(stopOffset);
     if (!chunk) break;
 
-    await transport.sendGfdi(buildFileTransferData(chunk.data, chunk.offset, chunk.runningCrc));
+    await sendGfdiChecked(transport, buildFileTransferData(chunk.data, chunk.offset, chunk.runningCrc), "FILE_TRANSFER_DATA");
     const transferStatus = await receiveKind(transport, "fileTransferData", timeoutMs);
     if (transferStatus.status !== Status.ACK || transferStatus.transferStatus !== TransferStatus.OK) {
       if (canRetryTransfer(transferStatus, data.length, retries, maxRetries)) {
@@ -1272,7 +1276,7 @@ async function uploadPipelinedChunks(data, transport, chunker, timeoutMs, pipeli
     for (let index = 0; index < pipelineWindow; index += 1) {
       const chunk = chunker.nextChunk(stopOffset);
       if (!chunk) break;
-      await transport.sendGfdi(buildFileTransferData(chunk.data, chunk.offset, chunk.runningCrc));
+      await sendGfdiChecked(transport, buildFileTransferData(chunk.data, chunk.offset, chunk.runningCrc), "FILE_TRANSFER_DATA");
       batch.push(chunk);
     }
     if (!batch.length) break;
@@ -1292,11 +1296,19 @@ async function uploadPipelinedChunks(data, transport, chunker, timeoutMs, pipeli
 }
 
 async function sendSystemEvent(transport, packet, timeoutMs) {
-  await transport.sendGfdi(packet);
+  await sendGfdiChecked(transport, packet, "SYSTEM_EVENT");
   const status = await receiveGenericStatus(transport, GarminMessage.SYSTEM_EVENT, timeoutMs);
   if (status.status !== Status.ACK) {
     throw new Error(`System event failed: ${JSON.stringify(status)}`);
   }
+}
+
+async function sendGfdiChecked(transport, packet, label) {
+  await withTimeout(
+    transport.sendGfdi(packet),
+    GFDI_WRITE_TIMEOUT_MS,
+    `${label} write timed out after ${Math.round(GFDI_WRITE_TIMEOUT_MS / 1000)}s`
+  );
 }
 
 async function receiveGenericStatus(transport, originalMessageType, timeoutMs) {
@@ -2137,7 +2149,7 @@ function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set
     { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 4, writeDelayMs: 10, label: "risky 400/180/4/10" },
     { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 4, writeDelayMs: 15, label: "risky 400/180/4/15" }
   ] : [];
-  const profiles = [baseSettings, FAST_FENIX6_TUNING, ...stableProfiles, ...riskyProfiles]
+  const profiles = [FAST_FENIX6_TUNING, ...stableProfiles, baseSettings, ...riskyProfiles]
     .filter((profile) => fileSize >= Math.max(1024, profile.maxPacketSize * profile.pipelineWindow))
     .filter((profile) => !failedProfiles.has(benchmarkProfileKey(profile)));
   return uniqueBenchmarkProfiles(profiles);
@@ -2506,6 +2518,16 @@ function log(message) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timeoutId = null;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  });
 }
 
 function hex(value, width) {
