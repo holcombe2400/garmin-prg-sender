@@ -7,6 +7,7 @@ const SAFE_GFDI_PACKET_SIZE = 375;
 const MAX_EXPERIMENTAL_GFDI_PACKET_SIZE = 8192;
 const LARGE_GFDI_PACKET_SIZE = 1500;
 const SAFE_BLE_FRAGMENT_SIZE = 20;
+const MAX_PIPELINE_WINDOW = 16;
 const TRUSTED_DEVICE_KEY = "garminPrgSender.trustedDevice";
 const SAVED_PRG_DB_NAME = "garminPrgSender.savedPrgs";
 const SAVED_PRG_DB_VERSION = 1;
@@ -22,6 +23,13 @@ const FAST_FENIX6_TUNING = Object.freeze({
   pipelineWindow: 2,
   writeDelayMs: 0,
   label: "fenix 6 fast preset"
+});
+const FAST_FENIX6_MLR_TUNING = Object.freeze({
+  maxPacketSize: 1500,
+  fragmentSize: SAFE_BLE_FRAGMENT_SIZE,
+  pipelineWindow: 8,
+  writeDelayMs: 0,
+  label: "fenix 6 MLR fast preset"
 });
 const BENCHMARK_MIN_BYTES = 12 * 1024;
 const BENCHMARK_MAX_BYTES = 24 * 1024;
@@ -237,6 +245,7 @@ async function init() {
   benchmarkSendButton?.addEventListener("click", () => sendPrg({ benchmark: true }));
   retryButton?.addEventListener("click", retryLastUpload);
   stopUploadButton?.addEventListener("click", () => stopActiveUpload("Upload stopped by user."));
+  reliableMlrInput?.addEventListener("change", onReliableMlrChanged);
   confirmTargetInput.addEventListener("change", () => {
     targetConfirmed = confirmTargetInput.checked;
     if (targetConfirmed && selectedDevice) {
@@ -1617,7 +1626,7 @@ async function uploadPrg(data, transport, options) {
   const timeoutMs = options.timeoutMs ?? 30000;
   const maxRetries = options.maxRetries ?? 5;
   const maxPacketSize = clampNumber(options.maxPacketSize, 64, MAX_EXPERIMENTAL_GFDI_PACKET_SIZE, SAFE_GFDI_PACKET_SIZE);
-  const pipelineWindow = clampNumber(options.pipelineWindow, 1, 8, 1);
+  const pipelineWindow = clampNumber(options.pipelineWindow, 1, MAX_PIPELINE_WINDOW, 1);
   const benchmarkProfiles = Array.isArray(options.benchmarkProfiles) ? options.benchmarkProfiles : [];
   const signal = options.signal;
 
@@ -2607,10 +2616,24 @@ function autoTuneSettings() {
     log(message);
     return;
   }
-  applyTuningSettings(FAST_FENIX6_TUNING);
-  const message = `Auto Tune applied ${FAST_FENIX6_TUNING.label}: GFDI ${FAST_FENIX6_TUNING.maxPacketSize}, BLE ${FAST_FENIX6_TUNING.fragmentSize}, pipeline ${FAST_FENIX6_TUNING.pipelineWindow}, delay ${FAST_FENIX6_TUNING.writeDelayMs} ms.`;
+  const preset = shouldUseMlrTuning() ? FAST_FENIX6_MLR_TUNING : FAST_FENIX6_TUNING;
+  applyTuningSettings(preset);
+  const message = `Auto Tune applied ${preset.label}: GFDI ${preset.maxPacketSize}, BLE ${preset.fragmentSize}, pipeline ${preset.pipelineWindow}, delay ${preset.writeDelayMs} ms.`;
   setStatus(message);
   log(`${message} Successful uploads will update the best setting automatically.`);
+}
+
+function onReliableMlrChanged() {
+  if (!reliableMlrInput?.checked) return;
+  const current = currentUploadSettings();
+  if (current.maxPacketSize < FAST_FENIX6_MLR_TUNING.maxPacketSize || current.pipelineWindow < FAST_FENIX6_MLR_TUNING.pipelineWindow) {
+    applyTuningSettings({
+      ...current,
+      maxPacketSize: Math.max(current.maxPacketSize, FAST_FENIX6_MLR_TUNING.maxPacketSize),
+      pipelineWindow: Math.max(current.pipelineWindow, FAST_FENIX6_MLR_TUNING.pipelineWindow)
+    });
+    log(`MLR selected; applied observed fast starting point: GFDI ${packetSizeInput.value}, BLE ${fragmentSizeInput.value}, pipeline ${pipelineWindowInput.value}, delay ${writeDelayInput.value} ms.`);
+  }
 }
 
 function rememberUploadRequest(benchmark, failedBenchmarkProfiles = new Set()) {
@@ -2657,12 +2680,12 @@ function applyTransportSettings(transport, settings) {
 
 function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set()) {
   const largeGfdiProfiles = shouldProbeLargeGfdi(baseSettings) ? [
-    { maxPacketSize: 1500, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "MLR probe 1500/20/2/0" },
-    { maxPacketSize: 2048, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "MLR probe 2048/20/2/0" },
-    { maxPacketSize: 3072, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "MLR probe 3072/20/2/0" },
-    { maxPacketSize: 4096, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "MLR probe 4096/20/2/0" },
-    { maxPacketSize: 6144, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "MLR probe 6144/20/2/0" },
-    { maxPacketSize: 8192, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "MLR probe 8192/20/2/0" }
+    { maxPacketSize: 1500, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 1500/20/8/0" },
+    { maxPacketSize: 2048, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 2048/20/8/0" },
+    { maxPacketSize: 3072, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 3072/20/8/0" },
+    { maxPacketSize: 4096, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 4096/20/8/0" },
+    { maxPacketSize: 6144, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 6144/20/8/0" },
+    { maxPacketSize: 8192, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 8, writeDelayMs: 0, label: "MLR probe 8192/20/8/0" }
   ] : [];
   const stableProfiles = [
     { maxPacketSize: 375, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 1, writeDelayMs: 0, label: "375/20/1/0" },
@@ -2673,6 +2696,9 @@ function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set
     { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 5, label: "400/20/2/5" }
   ];
   const riskyProfiles = riskyPipelineInput?.checked ? [
+    { maxPacketSize: 1500, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 10, writeDelayMs: 0, label: "risky MLR 1500/20/10/0" },
+    { maxPacketSize: 1500, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 12, writeDelayMs: 0, label: "risky MLR 1500/20/12/0" },
+    { maxPacketSize: 1500, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 16, writeDelayMs: 0, label: "risky MLR 1500/20/16/0" },
     { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 3, writeDelayMs: 5, label: "risky 400/20/3/5" },
     { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 3, writeDelayMs: 10, label: "risky 400/20/3/10" },
     { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 3, writeDelayMs: 15, label: "risky 400/20/3/15" },
@@ -2688,9 +2714,13 @@ function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set
 }
 
 function shouldProbeLargeGfdi(baseSettings) {
-  return Boolean(reliableMlrInput?.checked)
-    || String(connection?.kind || "").includes("reliable MLR")
+  return shouldUseMlrTuning()
     || Number(baseSettings.maxPacketSize) >= LARGE_GFDI_PACKET_SIZE;
+}
+
+function shouldUseMlrTuning() {
+  return Boolean(reliableMlrInput?.checked)
+    || String(connection?.kind || "").includes("reliable MLR");
 }
 
 function benchmarkProfileKey(profile) {
@@ -2704,7 +2734,7 @@ function uniqueBenchmarkProfiles(profiles) {
     const normalized = {
       maxPacketSize: clampNumber(profile.maxPacketSize, 64, MAX_EXPERIMENTAL_GFDI_PACKET_SIZE, SAFE_GFDI_PACKET_SIZE),
       fragmentSize: clampNumber(profile.fragmentSize, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE),
-      pipelineWindow: clampNumber(profile.pipelineWindow, 1, 8, 1),
+      pipelineWindow: clampNumber(profile.pipelineWindow, 1, MAX_PIPELINE_WINDOW, 1),
       writeDelayMs: clampNumber(profile.writeDelayMs, 0, 25, 0),
       label: profile.label || `${profile.maxPacketSize}/${profile.fragmentSize}/${profile.pipelineWindow}/${profile.writeDelayMs}`
     };
@@ -2770,7 +2800,7 @@ function isValidTuningResult(value) {
     && value.fragmentSize >= SAFE_BLE_FRAGMENT_SIZE
     && value.fragmentSize <= SAFE_BLE_FRAGMENT_SIZE
     && value.pipelineWindow >= 1
-    && value.pipelineWindow <= 8
+    && value.pipelineWindow <= MAX_PIPELINE_WINDOW
     && value.writeDelayMs >= 0
     && value.writeDelayMs <= 25
     && value.avgBps > 0;
@@ -2951,7 +2981,7 @@ function readBleFragmentSize() {
 
 function readPipelineWindow() {
   if (!pipelineWindowInput) return 1;
-  const value = clampNumber(pipelineWindowInput.value, 1, 8, 1);
+  const value = clampNumber(pipelineWindowInput.value, 1, MAX_PIPELINE_WINDOW, 1);
   pipelineWindowInput.value = String(value);
   return value;
 }
