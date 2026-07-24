@@ -26,6 +26,8 @@ const BENCHMARK_MAX_BYTES = 24 * 1024;
 const BENCHMARK_PROFILE_TIMEOUT_MS = 18000;
 const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 6;
+const WIFI_PROBE_TIMEOUT_MS = 3500;
+const WIFI_MAX_PORTS = 12;
 
 const GADGETBRIDGE_CLIENT_ID = 2;
 const REQUEST_REGISTER_ML = 0;
@@ -138,6 +140,11 @@ const bridgeDiagnosticsButton = document.querySelector("#bridgeDiagnosticsButton
 const scanButton = document.querySelector("#scanButton");
 const stopScanButton = document.querySelector("#stopScanButton");
 const scanSummary = document.querySelector("#scanSummary");
+const wifiIpInput = document.querySelector("#wifiIpInput");
+const wifiPortsInput = document.querySelector("#wifiPortsInput");
+const wifiProbeButton = document.querySelector("#wifiProbeButton");
+const wifiStopButton = document.querySelector("#wifiStopButton");
+const wifiProbeSummary = document.querySelector("#wifiProbeSummary");
 
 let selectedFile = null;
 let selectedDevice = null;
@@ -158,6 +165,8 @@ let wakeLock = null;
 let lastUploadRequest = null;
 let retryAvailable = false;
 let uploadAbortController = null;
+let isWifiProbing = false;
+let wifiProbeAbortController = null;
 
 init().catch((error) => showError("Startup failed", error));
 
@@ -206,6 +215,8 @@ async function init() {
   connectButton.addEventListener("click", connectWatch);
   scanButton.addEventListener("click", runDiagnosticScan);
   stopScanButton.addEventListener("click", () => stopDiagnosticScan("Scan stopped."));
+  wifiProbeButton?.addEventListener("click", runWifiProbe);
+  wifiStopButton?.addEventListener("click", stopWifiProbe);
   rememberWatchButton.addEventListener("click", rememberSelectedWatch);
   clearWatchButton.addEventListener("click", clearTrustedWatch);
   autoTuneButton?.addEventListener("click", autoTuneSettings);
@@ -774,6 +785,166 @@ function stopDiagnosticScan(message = "Scan complete.", shouldLog = true) {
   if (shouldLog) {
     log(`${message} Saw ${scanDevices.size} device(s), ${scanAdvertisementCount} advertisement(s).`);
   }
+}
+
+async function runWifiProbe() {
+  if (isWifiProbing || isBusy || isScanning) return;
+  const ip = normalizeWifiIp(wifiIpInput?.value || "");
+  if (!ip) {
+    wifiProbeSummary.textContent = "Enter a valid IPv4 address for the watch.";
+    setStatus("Wi-Fi probe needs a watch IP address.");
+    return;
+  }
+  let ports;
+  try {
+    ports = parseWifiPorts(wifiPortsInput?.value || "");
+  } catch (error) {
+    wifiProbeSummary.textContent = messageOf(error);
+    setStatus("Wi-Fi probe ports are invalid.");
+    return;
+  }
+
+  wifiProbeAbortController = new AbortController();
+  isWifiProbing = true;
+  updateButtons();
+  wifiProbeSummary.textContent = `Probing ${ip}...`;
+  setStatus(`Wi-Fi probe running against ${ip}.`);
+  log(`Wi-Fi probe started for ${ip}; ports ${ports.join(", ")}.`);
+  log("Browser limit: HTTPS pages and iOS may block local HTTP probes. A positive result is useful; failures are not definitive.");
+
+  const results = [];
+  try {
+    for (const port of ports) {
+      throwIfAborted(wifiProbeAbortController.signal);
+      for (const scheme of wifiProbeSchemesForPort(port)) {
+        throwIfAborted(wifiProbeAbortController.signal);
+        const result = await probeWifiUrl(buildWifiProbeUrl(ip, port, scheme), wifiProbeAbortController.signal);
+        results.push({ port, scheme, ...result });
+        const marker = result.ok ? "reachable" : result.status;
+        log(`Wi-Fi probe ${scheme} ${ip}:${port}: ${marker} in ${result.elapsedMs} ms${result.note ? ` (${result.note})` : ""}.`);
+        wifiProbeSummary.textContent = wifiProbeSummaryText(ip, results);
+      }
+    }
+  } catch (error) {
+    if (isAbortError(error) || wifiProbeAbortController.signal.aborted) {
+      log("Wi-Fi probe stopped.");
+      setStatus("Wi-Fi probe stopped.");
+    } else {
+      showError("Wi-Fi probe failed", error);
+    }
+  } finally {
+    isWifiProbing = false;
+    wifiProbeAbortController = null;
+    updateButtons();
+    wifiProbeSummary.textContent = wifiProbeSummaryText(ip, results);
+    const positives = results.filter((item) => item.ok);
+    if (positives.length) {
+      setStatus(`Wi-Fi probe found ${positives.length} browser-reachable endpoint(s).`);
+    } else if (results.length) {
+      setStatus("Wi-Fi probe found no browser-reachable local service.");
+    }
+  }
+}
+
+function stopWifiProbe() {
+  wifiProbeAbortController?.abort?.();
+  wifiProbeSummary.textContent = "Stopping Wi-Fi probe...";
+  updateButtons();
+}
+
+async function probeWifiUrl(url, signal) {
+  const startedAt = performance.now();
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), WIFI_PROBE_TIMEOUT_MS);
+  const abortHandler = () => controller.abort();
+  signal?.addEventListener?.("abort", abortHandler, { once: true });
+  try {
+    await fetch(url, {
+      method: "GET",
+      mode: "no-cors",
+      cache: "no-store",
+      signal: controller.signal
+    });
+    return {
+      ok: true,
+      status: "opaque-response",
+      elapsedMs: Math.round(performance.now() - startedAt),
+      note: "browser completed request"
+    };
+  } catch (error) {
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    if (signal?.aborted) throw abortError();
+    if (controller.signal.aborted) {
+      return { ok: false, status: "timeout", elapsedMs, note: `${WIFI_PROBE_TIMEOUT_MS} ms` };
+    }
+    return {
+      ok: false,
+      status: "blocked-or-closed",
+      elapsedMs,
+      note: classifyWifiProbeError(error, url)
+    };
+  } finally {
+    window.clearTimeout(timer);
+    signal?.removeEventListener?.("abort", abortHandler);
+  }
+}
+
+function buildWifiProbeUrl(ip, port, scheme) {
+  const defaultPort = scheme === "https" ? 443 : 80;
+  const portText = port === defaultPort ? "" : `:${port}`;
+  return `${scheme}://${ip}${portText}/?garmin_prg_probe=${Date.now()}`;
+}
+
+function wifiProbeSchemesForPort(port) {
+  if (port === 443 || port === 8443) return ["https"];
+  if (location.protocol === "https:") return ["https", "http"];
+  return ["http", "https"];
+}
+
+function normalizeWifiIp(value) {
+  const text = value.trim();
+  const match = text.match(/^([0-9]{1,3})(?:\.([0-9]{1,3})){3}$/);
+  if (!match) return "";
+  const parts = text.split(".").map((part) => Number(part));
+  if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return "";
+  if (parts[0] === 0 || parts[0] >= 224) return "";
+  return parts.join(".");
+}
+
+function parseWifiPorts(value) {
+  const ports = value
+    .split(/[,\s]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => Number(part));
+  if (!ports.length) throw new Error("Enter at least one TCP port.");
+  if (ports.some((port) => !Number.isInteger(port) || port < 1 || port > 65535)) {
+    throw new Error("Ports must be numbers from 1 to 65535.");
+  }
+  const unique = Array.from(new Set(ports));
+  if (unique.length > WIFI_MAX_PORTS) {
+    throw new Error(`Use ${WIFI_MAX_PORTS} ports or fewer for the browser probe.`);
+  }
+  return unique;
+}
+
+function wifiProbeSummaryText(ip, results) {
+  if (!results.length) return `No Wi-Fi probe results yet for ${ip}.`;
+  const positives = results.filter((item) => item.ok);
+  if (positives.length) {
+    return `Possible service on ${ip}: ${positives.map((item) => `${item.scheme}:${item.port}`).join(", ")}`;
+  }
+  const timeouts = results.filter((item) => item.status === "timeout").length;
+  return `No browser-reachable service found on ${ip}. ${timeouts}/${results.length} probe(s) timed out.`;
+}
+
+function classifyWifiProbeError(error, url) {
+  const message = messageOf(error);
+  if (location.protocol === "https:" && url.startsWith("http://")) {
+    return "possibly blocked as mixed content";
+  }
+  if (message.toLowerCase().includes("certificate")) return "certificate rejected";
+  return message || "request failed";
 }
 
 async function connectWatch() {
@@ -2505,6 +2676,8 @@ function updateButtons() {
   connectButton.disabled = isBusy || isScanning || !selectedDevice;
   scanButton.disabled = isBusy || isScanning || !getBluetooth();
   stopScanButton.disabled = !isScanning;
+  if (wifiProbeButton) wifiProbeButton.disabled = isBusy || isScanning || isWifiProbing;
+  if (wifiStopButton) wifiStopButton.disabled = !isWifiProbing;
   rememberWatchButton.disabled = isBusy || isScanning || !connection || !selectedDevice?.id;
   clearWatchButton.disabled = isBusy || isScanning || !trustedDevice;
   confirmTargetInput.disabled = isBusy || isScanning || !connection || hasTrustedMismatch();

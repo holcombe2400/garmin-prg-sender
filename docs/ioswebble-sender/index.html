@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG WebBLE Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260724-stall-retry">
+    <link rel="stylesheet" href="./styles.css?v=20260724-wifi-probe">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260724-stall-retry"></script>
+    <script type="module" src="./app.js?v=20260724-wifi-probe"></script>
   </head>
   <body>
     <main class="app">
@@ -107,6 +107,18 @@
           <button id="stopScanButton" type="button" disabled>Stop Scan</button>
         </div>
         <div id="scanSummary" class="meta">No scan run yet</div>
+      </section>
+
+      <section class="panel">
+        <label class="label" for="wifiIpInput">Wi-Fi probe</label>
+        <input id="wifiIpInput" type="text" inputmode="decimal" autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="Watch IP, e.g. 192.168.1.42">
+        <label class="label saved-label" for="wifiPortsInput">TCP ports</label>
+        <input id="wifiPortsInput" type="text" inputmode="numeric" autocapitalize="none" autocomplete="off" spellcheck="false" value="80,443,8000,8080,8443,9000">
+        <div class="row">
+          <button id="wifiProbeButton" type="button" class="secondary">Probe Wi-Fi</button>
+          <button id="wifiStopButton" type="button" class="secondary danger" disabled>Stop Probe</button>
+        </div>
+        <div id="wifiProbeSummary" class="meta">Enter the watch IP from your router or network scanner.</div>
       </section>
 
       <section class="panel">
