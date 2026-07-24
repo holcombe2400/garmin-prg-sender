@@ -39,7 +39,7 @@ const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 24;
 const WIFI_PROBE_TIMEOUT_MS = 3500;
 const WIFI_MAX_PORTS = 12;
-const PROTOCOL_TRACE_VERSION = "20260724-beacio-probe";
+const PROTOCOL_TRACE_VERSION = "20260724-api-fallback";
 const TRACE_HEX_PREVIEW_BYTES = 48;
 const MAX_PROTOCOL_TRACE_EVENTS = 6000;
 const MLR_FLAG_MASK = 0x80;
@@ -645,23 +645,28 @@ async function requestBluetoothDeviceWithFallback(pickerMode) {
   const candidates = getBluetoothCandidates();
   if (!candidates.length) throw new Error("Bluefy/Web Bluetooth is not available.");
 
-  const candidate = candidates[0];
   const variant = buildRequestVariant(pickerMode);
-  try {
-    log(`Trying ${candidate.label} requestDevice directly (${variant.label}).`);
-    return await candidate.bluetooth.requestDevice(variant.options);
-  } catch (error) {
-    log(`${candidate.label} requestDevice directly (${variant.label}) failed: ${messageOf(error)}`);
-    if (isOriginPickerRejection(error)) {
-      const foundLateCandidate = await appendLateBluetoothCandidates(candidates);
-      if (foundLateCandidate && apiModeInput.value !== "webble-only") {
-        apiModeInput.value = "webble-only";
-        updateBridgeDiagnostics();
-        await refreshBleAvailability();
-        updateButtons();
-        log("Switched Bluetooth API to extension only. Tap Choose Watch again.");
-        throw new Error("Bluetooth extension API is now active. Tap Choose Watch again; this first tap only woke the bridge.");
+  let lastError = null;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    try {
+      log(`Trying ${candidate.label} requestDevice directly (${variant.label}).`);
+      return await candidate.bluetooth.requestDevice(variant.options);
+    } catch (error) {
+      lastError = error;
+      log(`${candidate.label} requestDevice directly (${variant.label}) failed: ${messageOf(error)}`);
+      if (!isOriginPickerRejection(error)) throw error;
+      await appendLateBluetoothCandidates(candidates);
+      if (index < candidates.length - 1) {
+        log(`Trying next Bluetooth API after picker rejection: ${candidates[index + 1].label}.`);
+        continue;
       }
+      break;
+    }
+  }
+
+  if (lastError) {
+    if (isOriginPickerRejection(lastError)) {
       updateBridgeDiagnostics();
       const nextMode = nextPickerMode(pickerMode);
       if (nextMode) {
@@ -678,8 +683,9 @@ async function requestBluetoothDeviceWithFallback(pickerMode) {
         throw new Error(`Picker handoff failed. Switched access mode to ${serviceModeLabel(nextService)}; tap Choose Watch again.`);
       }
     }
-    throw error;
+    throw lastError;
   }
+  throw new Error("Bluetooth device picker did not return a device.");
 }
 
 function buildRequestVariant(pickerMode) {
@@ -2718,6 +2724,22 @@ function getBluetoothCandidates() {
   return candidates;
 }
 
+function getAllBluetoothCandidates() {
+  const candidates = [];
+  addBluetoothCandidate(candidates, "navigator.beacio", navigator.beacio);
+  addBluetoothCandidate(candidates, "navigator.webble", navigator.webble);
+  addBluetoothCandidate(candidates, "navigator.bluetooth", navigator.bluetooth);
+  return candidates;
+}
+
+function getLateBluetoothCandidates() {
+  const mode = apiModeInput?.value || "webble-first";
+  if (mode === "beacio-only" || mode === "ioswebble-only") {
+    return getBluetoothCandidates();
+  }
+  return getAllBluetoothCandidates();
+}
+
 function addBluetoothCandidate(candidates, label, bluetooth) {
   if (!bluetooth) return;
   if (candidates.some((candidate) => candidate.bluetooth === bluetooth)) return;
@@ -2727,7 +2749,7 @@ function addBluetoothCandidate(candidates, label, bluetooth) {
 async function appendLateBluetoothCandidates(candidates) {
   for (const delayMs of [0, 250, 750]) {
     if (delayMs) await sleep(delayMs);
-    const freshCandidates = getBluetoothCandidates();
+    const freshCandidates = getLateBluetoothCandidates();
     const newCandidates = freshCandidates.filter((fresh) =>
       !candidates.some((candidate) => candidate.bluetooth === fresh.bluetooth || candidate.label === fresh.label)
     );
