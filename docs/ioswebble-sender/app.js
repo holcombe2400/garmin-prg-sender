@@ -39,7 +39,7 @@ const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 24;
 const WIFI_PROBE_TIMEOUT_MS = 3500;
 const WIFI_MAX_PORTS = 12;
-const PROTOCOL_TRACE_VERSION = "20260724-trace-gfdi-fix";
+const PROTOCOL_TRACE_VERSION = "20260724-beacio-probe";
 const TRACE_HEX_PREVIEW_BYTES = 48;
 const MAX_PROTOCOL_TRACE_EVENTS = 6000;
 const MLR_FLAG_MASK = 0x80;
@@ -1252,6 +1252,7 @@ function releaseWakeLock() {
 
 async function connectGarminTransport(device, options) {
   const server = await device.gatt.connect();
+  await logGattServerCapabilities(server);
   try {
     const v2 = await tryV2Transport(server, options);
     if (v2) return v2;
@@ -1267,6 +1268,53 @@ async function connectGarminTransport(device, options) {
   const v0 = await tryKnownPair(server, UUIDS.v0Service, UUIDS.v0Receive, UUIDS.v0Send, "v0", options);
   if (v0) return v0;
   throw new Error("No supported Garmin GFDI transport found.");
+}
+
+async function logGattServerCapabilities(server) {
+  const methodNames = ["getWriteLimits", "getMtu", "getEffectiveMtu"];
+  const exposedMethods = methodNames.filter((name) => typeof server?.[name] === "function");
+  if (!exposedMethods.length) {
+    log("GATT write limits are not exposed by this Bluetooth API.");
+    return;
+  }
+  log(`GATT server exposes extension method(s): ${exposedMethods.join(", ")}.`);
+  try {
+    let limits = null;
+    if (typeof server.getWriteLimits === "function") {
+      limits = await server.getWriteLimits();
+      const withoutResponse = normalizeOptionalNumber(limits?.withoutResponse);
+      const withResponse = normalizeOptionalNumber(limits?.withResponse);
+      const mtu = normalizeOptionalNumber(limits?.mtu);
+      const payload = withoutResponse ?? (mtu && mtu > 3 ? mtu - 3 : null);
+      log(`GATT write limits: without-response=${formatOptionalNumber(withoutResponse)}, with-response=${formatOptionalNumber(withResponse)}, mtu=${formatOptionalNumber(mtu)}, suggested BLE fragment=${formatOptionalNumber(payload)}.`);
+      if (payload && payload > SAFE_BLE_FRAGMENT_SIZE) {
+        log(`Beacio/WebBLE reports a larger write payload (${payload}). Try BLE fragment ${Math.min(payload, MAX_BLE_FRAGMENT_SIZE)} with Force BLE fragments above 20 enabled.`);
+      }
+      return;
+    }
+    if (typeof server.getMtu === "function") {
+      const mtu = normalizeOptionalNumber(await server.getMtu());
+      const payload = mtu && mtu > 3 ? mtu - 3 : null;
+      log(`GATT MTU: ${formatOptionalNumber(mtu)}, suggested BLE fragment=${formatOptionalNumber(payload)}.`);
+      return;
+    }
+    if (typeof server.getEffectiveMtu === "function") {
+      const mtu = normalizeOptionalNumber(await server.getEffectiveMtu());
+      const payload = mtu && mtu > 3 ? mtu - 3 : null;
+      log(`GATT effective MTU: ${formatOptionalNumber(mtu)}, suggested BLE fragment=${formatOptionalNumber(payload)}.`);
+    }
+  } catch (error) {
+    log(`GATT write-limit probe failed: ${messageOf(error)}`);
+  }
+}
+
+function normalizeOptionalNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function formatOptionalNumber(value) {
+  return value === null || value === undefined ? "n/a" : String(value);
 }
 
 async function tryV2Transport(server, options) {
@@ -2649,7 +2697,11 @@ function getBluetooth() {
 function getBluetoothCandidates() {
   const mode = apiModeInput?.value || "webble-first";
   const candidates = [];
-  if (mode === "webble-only") {
+  if (mode === "beacio-only") {
+    addBluetoothCandidate(candidates, "navigator.beacio", navigator.beacio);
+  } else if (mode === "ioswebble-only") {
+    addBluetoothCandidate(candidates, "navigator.webble", navigator.webble);
+  } else if (mode === "webble-only") {
     addBluetoothCandidate(candidates, "navigator.beacio", navigator.beacio);
     addBluetoothCandidate(candidates, "navigator.webble", navigator.webble);
   } else if (mode === "bluetooth-only") {
@@ -2736,6 +2788,10 @@ function collectBridgeDiagnostics() {
     beacioCdnInstalled: dataset.beacioCdnInstalled || "missing",
     beacioCdnActive: dataset.beacioCdnActive || "missing",
     beacioCdnDatasetState: dataset.beacioCdnState || "missing",
+    beacioIOS: Boolean(window.beacioIOS),
+    beacioBackgroundSync: Boolean(navigator.beacio?.backgroundSync || window.beacioIOS?.backgroundSync),
+    webbleIOS: Boolean(window.webbleIOS),
+    webbleBackgroundSync: Boolean(navigator.webble?.backgroundSync || window.webbleIOS?.backgroundSync),
     webkitMessageHandlers: listObjectKeys(window.webkit?.messageHandlers),
     beacioMethods: listBluetoothMethods(navigator.beacio),
     webbleMethods: listBluetoothMethods(navigator.webble),
@@ -2759,6 +2815,10 @@ function formatDiagnostics(diagnostics) {
     `dataset.state=${diagnostics.beacioCdnDatasetState}`,
     `dataset.installed=${diagnostics.beacioCdnInstalled}`,
     `dataset.active=${diagnostics.beacioCdnActive}`,
+    `beacioIOS=${diagnostics.beacioIOS}`,
+    `beacio.backgroundSync=${diagnostics.beacioBackgroundSync}`,
+    `webbleIOS=${diagnostics.webbleIOS}`,
+    `webble.backgroundSync=${diagnostics.webbleBackgroundSync}`,
     `webkit.handlers=${diagnostics.webkitMessageHandlers}`,
     `beacio.methods=${diagnostics.beacioMethods}`,
     `webble.methods=${diagnostics.webbleMethods}`,
