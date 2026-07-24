@@ -39,7 +39,7 @@ const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 24;
 const WIFI_PROBE_TIMEOUT_MS = 3500;
 const WIFI_MAX_PORTS = 12;
-const PROTOCOL_TRACE_VERSION = "20260724-trace-share";
+const PROTOCOL_TRACE_VERSION = "20260724-trace-gfdi-fix";
 const TRACE_HEX_PREVIEW_BYTES = 48;
 const MAX_PROTOCOL_TRACE_EVENTS = 6000;
 const MLR_FLAG_MASK = 0x80;
@@ -2387,15 +2387,33 @@ function decodeGfdiPacket(packet) {
     crcOk: expectedCrc === actualCrc
   });
   if (messageType.id === GarminMessage.RESPONSE && packet.length >= 9) {
-    const status = packet[4];
-    const originalMessageType = readU16(packet, 5);
+    const originalMessageType = readU16(packet, 4);
+    const status = packet[6];
+    const restOffset = 7;
     decoded.response = {
       status,
       statusName: gfdiStatusName(status),
       originalMessageType,
       originalMessageName: garminMessageName(originalMessageType),
-      payloadLength: Math.max(0, packet.length - 9)
+      payloadLength: Math.max(0, packet.length - restOffset - 2)
     };
+    if (status === Status.ACK && originalMessageType === GarminMessage.FILE_TRANSFER_DATA && packet.length >= restOffset + 5 + 2) {
+      decoded.response.transferStatus = packet[restOffset];
+      decoded.response.transferStatusName = transferStatusName(packet[restOffset]);
+      decoded.response.dataOffset = readU32(packet, restOffset + 1);
+    } else if (status === Status.ACK && originalMessageType === GarminMessage.UPLOAD_REQUEST && packet.length >= restOffset + 11 + 2) {
+      decoded.response.uploadStatus = packet[restOffset];
+      decoded.response.dataOffset = readU32(packet, restOffset + 1);
+      decoded.response.maxFileSize = readU32(packet, restOffset + 5);
+      decoded.response.crcSeed = readU16(packet, restOffset + 9);
+    } else if (status === Status.ACK && originalMessageType === GarminMessage.CREATE_FILE && packet.length >= restOffset + 7 + 2) {
+      decoded.response.createStatus = packet[restOffset];
+      decoded.response.createStatusName = createStatusName(packet[restOffset]);
+      decoded.response.fileIndex = readU16(packet, restOffset + 1);
+      decoded.response.dataType = packet[restOffset + 3];
+      decoded.response.subtype = packet[restOffset + 4];
+      decoded.response.fileNumber = readU16(packet, restOffset + 5);
+    }
   }
   return decoded;
 }
@@ -2446,6 +2464,13 @@ function gfdiStatusName(value) {
     0x05: "LENGTH_ERROR"
   };
   return names[value] || `STATUS_${value}`;
+}
+
+function transferStatusName(value) {
+  for (const [name, code] of Object.entries(TransferStatus)) {
+    if (code === value) return name;
+  }
+  return `TRANSFER_STATUS_${value}`;
 }
 
 function bytesToHexPreview(bytes, limit = TRACE_HEX_PREVIEW_BYTES) {
