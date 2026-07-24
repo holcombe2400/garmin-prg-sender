@@ -21,6 +21,9 @@ const FAST_FENIX6_TUNING = Object.freeze({
   writeDelayMs: 0,
   label: "fenix 6 fast preset"
 });
+const BENCHMARK_MIN_BYTES = 12 * 1024;
+const BENCHMARK_MAX_BYTES = 24 * 1024;
+const MAX_BENCHMARK_RESTARTS = 3;
 
 const GADGETBRIDGE_CLIENT_ID = 2;
 const REQUEST_REGISTER_ML = 0;
@@ -110,6 +113,8 @@ const trustedWatchText = document.querySelector("#trustedWatchText");
 const rememberWatchButton = document.querySelector("#rememberWatchButton");
 const clearWatchButton = document.querySelector("#clearWatchButton");
 const autoTuneButton = document.querySelector("#autoTuneButton");
+const benchmarkSendButton = document.querySelector("#benchmarkSendButton");
+const riskyPipelineInput = document.querySelector("#riskyPipelineInput");
 const progressBar = document.querySelector("#progressBar");
 const progressText = document.querySelector("#progressText");
 const statusText = document.querySelector("#statusText");
@@ -197,6 +202,7 @@ async function init() {
   rememberWatchButton.addEventListener("click", rememberSelectedWatch);
   clearWatchButton.addEventListener("click", clearTrustedWatch);
   autoTuneButton?.addEventListener("click", autoTuneSettings);
+  benchmarkSendButton?.addEventListener("click", () => sendPrg({ benchmark: true }));
   confirmTargetInput.addEventListener("change", () => {
     targetConfirmed = confirmTargetInput.checked;
     if (targetConfirmed && selectedDevice) {
@@ -214,7 +220,7 @@ async function init() {
       releaseWakeLock();
     }
   });
-  sendButton.addEventListener("click", sendPrg);
+  sendButton.addEventListener("click", () => sendPrg({ benchmark: false }));
   updateTrustedWatchUi();
   await refreshSavedPrgLibrary();
   updateBridgeDiagnostics();
@@ -792,52 +798,28 @@ async function connectWatch() {
   }
 }
 
-async function sendPrg() {
+async function sendPrg({ benchmark = false } = {}) {
   if (!selectedFile || !connection || !targetConfirmed || hasTrustedMismatch()) return;
+  const failedBenchmarkProfiles = new Set();
   try {
     isUploading = true;
     setBusy(true);
     foregroundWarning.textContent = "Keep Bluefy open in the foreground until upload reaches 100%. Calls, lock screen, or app switching can break the transfer.";
     await requestWakeLock("upload start");
-    setProgress(0, 0, selectedFile.size);
-    let uploadStats = null;
-    const maxPacketSize = readGfdiPacketSize();
-    const fragmentSize = readNumber(fragmentSizeInput, 20);
-    const pipelineWindow = readPipelineWindow();
-    const writeDelayMs = readNumber(writeDelayInput, 0);
-    log(`Upload settings: GFDI packet ${maxPacketSize}, BLE fragment ${fragmentSize}, pipeline ${pipelineWindow}, write delay ${writeDelayMs} ms.`);
-    if (maxPacketSize > SAFE_GFDI_PACKET_SIZE) {
-      log(`Experimental GFDI packet size ${maxPacketSize}. If this stalls or fails, retry with ${SAFE_GFDI_PACKET_SIZE}.`);
-    }
-    if (pipelineWindow > 1) {
-      log(`Experimental pipeline window ${pipelineWindow}. If upload fails, retry with Pipeline chunks 1.`);
-    }
-    await uploadPrg(selectedFile.data, connection, {
-      maxPacketSize,
-      pipelineWindow,
-      timeoutMs: 30000,
-      maxRetries: 5,
-      onProgress: ({ offset, total }) => {
-        if (!uploadStats) uploadStats = createTransferStats(total);
-        setProgress(Math.floor((100 * offset) / total), offset, total, uploadStats);
+    const maxAttempts = benchmark ? MAX_BENCHMARK_RESTARTS + 1 : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        await sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt });
+        return;
+      } catch (error) {
+        if (!benchmark || !error?.benchmarkProfile || attempt >= maxAttempts) throw error;
+        const profile = error.benchmarkProfile;
+        failedBenchmarkProfiles.add(benchmarkProfileKey(profile));
+        log(`Benchmark profile failed and will be skipped: ${profile.label}. ${messageOf(error.cause || error)}`);
+        setStatus(`Benchmark profile failed: ${profile.label}. Reconnecting and trying the next setting...`);
+        await reconnectForBenchmarkRetry(currentUploadSettings());
       }
-    });
-    setProgress(100, selectedFile.size, selectedFile.size, uploadStats);
-    const transferMetrics = uploadStats ? completedTransferMetrics(uploadStats, selectedFile.size) : null;
-    const transferSummary = transferMetrics ? transferSummaryText(transferMetrics) : "";
-    setStatus(transferSummary ? `Upload complete. ${transferSummary} Let Garmin Connect reconnect to register the app.` : "Upload complete. Let Garmin Connect reconnect to register the app.");
-    if (transferSummary) log(transferSummary);
-    if (transferMetrics) recordTuningResult({
-      maxPacketSize,
-      fragmentSize,
-      pipelineWindow,
-      writeDelayMs,
-      avgBps: transferMetrics.avgBps,
-      elapsedSec: transferMetrics.elapsedSec,
-      fileSize: selectedFile.size,
-      transportKind: connection.kind
-    });
-    log("Upload complete. Garmin Connect must perform the registration pass.");
+    }
   } catch (error) {
     showError("Upload failed", error);
   } finally {
@@ -846,6 +828,76 @@ async function sendPrg() {
     foregroundWarning.textContent = "Keep Bluefy open in the foreground until upload reaches 100%.";
     setBusy(false);
   }
+}
+
+async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt }) {
+  setProgress(0, 0, selectedFile.size);
+  let uploadStats = null;
+  const settings = currentUploadSettings();
+  applyTransportSettings(connection, settings);
+  const benchmarkProfiles = benchmark ? buildBenchmarkProfiles(settings, selectedFile.size, failedBenchmarkProfiles) : null;
+  log(`Upload attempt ${attempt}. Settings: GFDI packet ${settings.maxPacketSize}, BLE fragment ${settings.fragmentSize}, pipeline ${settings.pipelineWindow}, write delay ${settings.writeDelayMs} ms.`);
+  if (benchmarkProfiles) {
+    log(`Benchmark Send enabled. Testing ${benchmarkProfiles.length} setting profile(s), then finishing with the fastest stable result.`);
+    if (riskyPipelineInput?.checked) log("Risky pipeline profiles are enabled; failed profiles will trigger reconnect/retry.");
+  }
+  if (settings.maxPacketSize > SAFE_GFDI_PACKET_SIZE) {
+    log(`Experimental GFDI packet size ${settings.maxPacketSize}. If this stalls or fails, retry with ${SAFE_GFDI_PACKET_SIZE}.`);
+  }
+  if (settings.pipelineWindow > 1) {
+    log(`Experimental pipeline window ${settings.pipelineWindow}. If upload fails, retry with Pipeline chunks 1.`);
+  }
+  await uploadPrg(selectedFile.data, connection, {
+    ...settings,
+    benchmarkProfiles,
+    timeoutMs: 30000,
+    maxRetries: 5,
+    onBenchmarkProfile: (result) => {
+      log(`Benchmark ${result.label}: ${formatRate(result.avgBps)} over ${formatBytes(result.bytes)}.`);
+    },
+    onBenchmarkSelected: (result) => {
+      applyTuningSettings(result);
+      log(`Benchmark selected ${result.label}: ${formatRate(result.avgBps)}.`);
+    },
+    onProgress: ({ offset, total }) => {
+      if (!uploadStats) uploadStats = createTransferStats(total);
+      setProgress(Math.floor((100 * offset) / total), offset, total, uploadStats);
+    }
+  });
+  setProgress(100, selectedFile.size, selectedFile.size, uploadStats);
+  const transferMetrics = uploadStats ? completedTransferMetrics(uploadStats, selectedFile.size) : null;
+  const transferSummary = transferMetrics ? transferSummaryText(transferMetrics) : "";
+  setStatus(transferSummary ? `Upload complete. ${transferSummary} Let Garmin Connect reconnect to register the app.` : "Upload complete. Let Garmin Connect reconnect to register the app.");
+  if (transferSummary) log(transferSummary);
+  if (transferMetrics) recordTuningResult({
+    ...currentUploadSettings(),
+    avgBps: transferMetrics.avgBps,
+    elapsedSec: transferMetrics.elapsedSec,
+    fileSize: selectedFile.size,
+    transportKind: connection.kind
+  });
+  log("Upload complete. Garmin Connect must perform the registration pass.");
+}
+
+async function reconnectForBenchmarkRetry(settings) {
+  try {
+    selectedDevice?.gatt?.disconnect?.();
+  } catch (error) {
+    log(`Disconnect before benchmark retry failed: ${messageOf(error)}`);
+  }
+  connection = null;
+  setTargetConfirmed(false);
+  updateButtons();
+  await sleep(1500);
+  connection = await connectGarminTransport(selectedDevice, {
+    writeFragmentSize: settings.fragmentSize,
+    writeDelayMs: settings.writeDelayMs
+  });
+  updateWatchIdentity(`Connected using Garmin ${connection.kind}`);
+  updateTrustedWatchUi();
+  if (hasTrustedMismatch()) throw new Error("Reconnected device does not match the trusted watch.");
+  setTargetConfirmed(true);
+  log(`Reconnected using Garmin ${connection.kind} transport for benchmark retry.`);
 }
 
 async function requestWakeLock(reason) {
@@ -1075,6 +1127,7 @@ async function uploadPrg(data, transport, options) {
   const maxRetries = options.maxRetries ?? 5;
   const maxPacketSize = clampNumber(options.maxPacketSize, 64, MAX_EXPERIMENTAL_GFDI_PACKET_SIZE, SAFE_GFDI_PACKET_SIZE);
   const pipelineWindow = clampNumber(options.pipelineWindow, 1, 8, 1);
+  const benchmarkProfiles = Array.isArray(options.benchmarkProfiles) ? options.benchmarkProfiles : [];
 
   log("Sending SYNC_READY.");
   await sendSystemEvent(transport, buildSyncReady(), timeoutMs);
@@ -1107,10 +1160,17 @@ async function uploadPrg(data, transport, options) {
   const chunker = new UploadChunker(data, maxPacketSize, uploadStatus.dataOffset, initialCrc);
   options.onProgress?.({ offset: uploadStatus.dataOffset, total: data.length });
 
-  if (pipelineWindow <= 1) {
+  const benchmarkBest = benchmarkProfiles.length
+    ? await uploadBenchmarkProfiles(data, transport, chunker, timeoutMs, maxRetries, benchmarkProfiles, options)
+    : null;
+  const finalSettings = benchmarkBest || { maxPacketSize, pipelineWindow, fragmentSize: options.fragmentSize, writeDelayMs: options.writeDelayMs };
+  applyTransportSettings(transport, finalSettings);
+  chunker.setMaxPacketSize(finalSettings.maxPacketSize);
+
+  if (finalSettings.pipelineWindow <= 1) {
     await uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRetries, options);
   } else {
-    await uploadPipelinedChunks(data, transport, chunker, timeoutMs, pipelineWindow, options);
+    await uploadPipelinedChunks(data, transport, chunker, timeoutMs, finalSettings.pipelineWindow, options);
   }
 
   log("Sending SYNC_COMPLETE.");
@@ -1118,10 +1178,64 @@ async function uploadPrg(data, transport, options) {
   await sleep(2000);
 }
 
-async function uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRetries, options) {
+async function uploadBenchmarkProfiles(data, transport, chunker, timeoutMs, maxRetries, profiles, options) {
+  const results = [];
+  for (const profile of profiles) {
+    if (chunker.offset >= data.length) break;
+    const bytesToTest = benchmarkBytesForProfile(profile, data.length - chunker.offset);
+    if (bytesToTest <= 0) break;
+    applyTransportSettings(transport, profile);
+    chunker.setMaxPacketSize(profile.maxPacketSize);
+    const startOffset = chunker.offset;
+    const stopOffset = Math.min(data.length, startOffset + bytesToTest);
+    const startedAt = performance.now();
+    log(`Benchmarking ${profile.label}: ${formatBytes(stopOffset - startOffset)}.`);
+    try {
+      if (profile.pipelineWindow <= 1) {
+        await uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRetries, options, stopOffset);
+      } else {
+        await uploadPipelinedChunks(data, transport, chunker, timeoutMs, profile.pipelineWindow, options, stopOffset);
+      }
+    } catch (error) {
+      throw benchmarkProfileFailure(profile, error);
+    }
+    const elapsedSec = Math.max((performance.now() - startedAt) / 1000, 0);
+    const bytes = Math.max(0, chunker.offset - startOffset);
+    const avgBps = elapsedSec > 0 ? bytes / elapsedSec : 0;
+    const result = { ...profile, bytes, elapsedSec, avgBps };
+    results.push(result);
+    options.onBenchmarkProfile?.(result);
+    recordTuningResult({
+      ...result,
+      fileSize: data.length,
+      transportKind: transport.kind
+    });
+  }
+  if (!results.length) return null;
+  const best = results
+    .filter((result) => Number.isFinite(result.avgBps) && result.avgBps > 0)
+    .sort((left, right) => right.avgBps - left.avgBps)[0] || null;
+  if (best) options.onBenchmarkSelected?.(best);
+  return best;
+}
+
+function benchmarkProfileFailure(profile, error) {
+  const wrapped = new Error(`Benchmark profile failed: ${profile.label}. ${messageOf(error)}`);
+  wrapped.benchmarkProfile = profile;
+  wrapped.cause = error;
+  return wrapped;
+}
+
+function benchmarkBytesForProfile(profile, remainingBytes) {
+  const packetPayload = Math.max(1, profile.maxPacketSize - 13);
+  const target = Math.max(BENCHMARK_MIN_BYTES, packetPayload * Math.max(12, profile.pipelineWindow * 6));
+  return Math.min(remainingBytes, Math.min(BENCHMARK_MAX_BYTES, target));
+}
+
+async function uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRetries, options, stopOffset = data.length) {
   let retries = 0;
   while (true) {
-    const chunk = chunker.nextChunk();
+    const chunk = chunker.nextChunk(stopOffset);
     if (!chunk) break;
 
     await transport.sendGfdi(buildFileTransferData(chunk.data, chunk.offset, chunk.runningCrc));
@@ -1152,11 +1266,11 @@ async function uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRe
   }
 }
 
-async function uploadPipelinedChunks(data, transport, chunker, timeoutMs, pipelineWindow, options) {
+async function uploadPipelinedChunks(data, transport, chunker, timeoutMs, pipelineWindow, options, stopOffset = data.length) {
   while (true) {
     const batch = [];
     for (let index = 0; index < pipelineWindow; index += 1) {
-      const chunk = chunker.nextChunk();
+      const chunk = chunker.nextChunk(stopOffset);
       if (!chunk) break;
       await transport.sendGfdi(buildFileTransferData(chunk.data, chunk.offset, chunk.runningCrc));
       batch.push(chunk);
@@ -1214,9 +1328,14 @@ class UploadChunker {
   constructor(data, maxPacketSize, initialOffset = 0, initialCrc = undefined) {
     if (maxPacketSize <= 13) throw new Error("GFDI packet size must be greater than 13.");
     this.data = data;
-    this.maxPayloadSize = maxPacketSize - 13;
+    this.setMaxPacketSize(maxPacketSize);
     this.offset = initialOffset;
     this.runningCrc = initialCrc === undefined ? garminCrc(data.slice(0, initialOffset)) : initialCrc & 0xffff;
+  }
+
+  setMaxPacketSize(maxPacketSize) {
+    if (maxPacketSize <= 13) throw new Error("GFDI packet size must be greater than 13.");
+    this.maxPayloadSize = maxPacketSize - 13;
   }
 
   seek(offset, runningCrc = undefined) {
@@ -1225,9 +1344,10 @@ class UploadChunker {
     this.runningCrc = runningCrc === undefined ? garminCrc(this.data.slice(0, offset)) : runningCrc & 0xffff;
   }
 
-  nextChunk() {
-    if (this.offset >= this.data.length) return null;
-    const data = this.data.slice(this.offset, this.offset + this.maxPayloadSize);
+  nextChunk(stopOffset = this.data.length) {
+    const limit = Math.min(this.data.length, Math.max(0, stopOffset));
+    if (this.offset >= limit) return null;
+    const data = this.data.slice(this.offset, Math.min(limit, this.offset + this.maxPayloadSize));
     const offset = this.offset;
     this.runningCrc = garminCrc(data, this.runningCrc);
     this.offset += data.length;
@@ -1978,11 +2098,72 @@ function autoTuneSettings() {
   log(`${message} Successful uploads will update the best setting automatically.`);
 }
 
+function currentUploadSettings() {
+  return {
+    maxPacketSize: readGfdiPacketSize(),
+    fragmentSize: readBleFragmentSize(),
+    pipelineWindow: readPipelineWindow(),
+    writeDelayMs: readWriteDelayMs(),
+    label: "current"
+  };
+}
+
 function applyTuningSettings(settings) {
   packetSizeInput.value = String(settings.maxPacketSize);
   fragmentSizeInput.value = String(settings.fragmentSize);
   pipelineWindowInput.value = String(settings.pipelineWindow);
   writeDelayInput.value = String(settings.writeDelayMs);
+}
+
+function applyTransportSettings(transport, settings) {
+  if (!transport) return;
+  transport.writeFragmentSize = clampNumber(settings.fragmentSize, 20, 180, 20);
+  transport.writeDelayMs = clampNumber(settings.writeDelayMs, 0, 25, 0);
+}
+
+function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set()) {
+  const stableProfiles = [
+    { maxPacketSize: 375, fragmentSize: 180, pipelineWindow: 1, writeDelayMs: 0, label: "375/180/1/0" },
+    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 1, writeDelayMs: 0, label: "400/180/1/0" },
+    { maxPacketSize: 375, fragmentSize: 180, pipelineWindow: 2, writeDelayMs: 0, label: "375/180/2/0" },
+    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 2, writeDelayMs: 0, label: "400/180/2/0" },
+    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 2, writeDelayMs: 2, label: "400/180/2/2" },
+    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 2, writeDelayMs: 5, label: "400/180/2/5" }
+  ];
+  const riskyProfiles = riskyPipelineInput?.checked ? [
+    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 3, writeDelayMs: 5, label: "risky 400/180/3/5" },
+    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 3, writeDelayMs: 10, label: "risky 400/180/3/10" },
+    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 3, writeDelayMs: 15, label: "risky 400/180/3/15" },
+    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 4, writeDelayMs: 10, label: "risky 400/180/4/10" },
+    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 4, writeDelayMs: 15, label: "risky 400/180/4/15" }
+  ] : [];
+  const profiles = [baseSettings, FAST_FENIX6_TUNING, ...stableProfiles, ...riskyProfiles]
+    .filter((profile) => fileSize >= Math.max(1024, profile.maxPacketSize * profile.pipelineWindow))
+    .filter((profile) => !failedProfiles.has(benchmarkProfileKey(profile)));
+  return uniqueBenchmarkProfiles(profiles);
+}
+
+function benchmarkProfileKey(profile) {
+  return `${profile.maxPacketSize}/${profile.fragmentSize}/${profile.pipelineWindow}/${profile.writeDelayMs}`;
+}
+
+function uniqueBenchmarkProfiles(profiles) {
+  const seen = new Set();
+  const unique = [];
+  for (const profile of profiles) {
+    const normalized = {
+      maxPacketSize: clampNumber(profile.maxPacketSize, 64, MAX_EXPERIMENTAL_GFDI_PACKET_SIZE, SAFE_GFDI_PACKET_SIZE),
+      fragmentSize: clampNumber(profile.fragmentSize, 20, 180, 20),
+      pipelineWindow: clampNumber(profile.pipelineWindow, 1, 8, 1),
+      writeDelayMs: clampNumber(profile.writeDelayMs, 0, 25, 0),
+      label: profile.label || `${profile.maxPacketSize}/${profile.fragmentSize}/${profile.pipelineWindow}/${profile.writeDelayMs}`
+    };
+    const key = benchmarkProfileKey(normalized);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push({ ...normalized, label: key === `${normalized.label}` ? normalized.label : `${normalized.label} (${key})` });
+  }
+  return unique;
 }
 
 function recordTuningResult(result) {
@@ -2177,6 +2358,7 @@ function updateButtons() {
   clearWatchButton.disabled = isBusy || isScanning || !trustedDevice;
   confirmTargetInput.disabled = isBusy || isScanning || !connection || hasTrustedMismatch();
   sendButton.disabled = isBusy || isScanning || !selectedFile || !connection || !targetConfirmed || hasTrustedMismatch();
+  if (benchmarkSendButton) benchmarkSendButton.disabled = sendButton.disabled;
   if (autoTuneButton) autoTuneButton.disabled = isBusy || isScanning;
 }
 
@@ -2201,10 +2383,22 @@ function readGfdiPacketSize() {
   return value;
 }
 
+function readBleFragmentSize() {
+  const value = clampNumber(fragmentSizeInput.value, 20, 180, 20);
+  fragmentSizeInput.value = String(value);
+  return value;
+}
+
 function readPipelineWindow() {
   if (!pipelineWindowInput) return 1;
   const value = clampNumber(pipelineWindowInput.value, 1, 8, 1);
   pipelineWindowInput.value = String(value);
+  return value;
+}
+
+function readWriteDelayMs() {
+  const value = clampNumber(writeDelayInput.value, 0, 25, 0);
+  writeDelayInput.value = String(value);
   return value;
 }
 
