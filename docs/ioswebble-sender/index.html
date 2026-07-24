@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG Bluetooth Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260724-mlr-window32-ack20">
+    <link rel="stylesheet" href="./styles.css?v=20260724-trace-export">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260724-mlr-window32-ack20"></script>
+    <script type="module" src="./app.js?v=20260724-trace-export"></script>
   </head>
   <body>
     <main class="app">
@@ -173,6 +173,17 @@
 
       <section class="panel details">
         <button id="detailsButton" type="button" class="secondary">Show Details</button>
+        <div class="trace-controls">
+          <label class="toggle-row">
+            <input id="protocolTraceInput" type="checkbox">
+            <span>Trace Garmin protocol</span>
+          </label>
+          <div class="row">
+            <button id="exportTraceButton" type="button" class="secondary" disabled>Export Trace</button>
+            <button id="clearTraceButton" type="button" class="secondary" disabled>Clear Trace</button>
+          </div>
+          <div id="traceMeta" class="meta">No protocol trace captured</div>
+        </div>
         <pre id="log" hidden></pre>
       </section>
     </main>

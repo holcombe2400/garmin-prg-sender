@@ -39,6 +39,9 @@ const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 24;
 const WIFI_PROBE_TIMEOUT_MS = 3500;
 const WIFI_MAX_PORTS = 12;
+const PROTOCOL_TRACE_VERSION = "20260724-trace-export";
+const TRACE_HEX_PREVIEW_BYTES = 48;
+const MAX_PROTOCOL_TRACE_EVENTS = 6000;
 const MLR_FLAG_MASK = 0x80;
 const MLR_HANDLE_MASK = 0x70;
 const MLR_REQ_NUM_MASK = 0x0f;
@@ -154,6 +157,10 @@ const progressText = document.querySelector("#progressText");
 const statusText = document.querySelector("#statusText");
 const logEl = document.querySelector("#log");
 const detailsButton = document.querySelector("#detailsButton");
+const protocolTraceInput = document.querySelector("#protocolTraceInput");
+const exportTraceButton = document.querySelector("#exportTraceButton");
+const clearTraceButton = document.querySelector("#clearTraceButton");
+const traceMeta = document.querySelector("#traceMeta");
 const packetSizeInput = document.querySelector("#packetSizeInput");
 const fragmentSizeInput = document.querySelector("#fragmentSizeInput");
 const pipelineWindowInput = document.querySelector("#pipelineWindowInput");
@@ -195,6 +202,8 @@ let retryAvailable = false;
 let uploadAbortController = null;
 let isWifiProbing = false;
 let wifiProbeAbortController = null;
+let protocolTrace = [];
+let protocolTraceSequence = 0;
 
 init().catch((error) => showError("Startup failed", error));
 
@@ -204,6 +213,12 @@ async function init() {
     logEl.hidden = !logEl.hidden;
     detailsButton.textContent = logEl.hidden ? "Show Details" : "Hide Details";
   });
+  protocolTraceInput?.addEventListener("change", () => {
+    log(`Garmin protocol trace ${protocolTraceInput.checked ? "enabled" : "disabled"}.`);
+    updateTraceMeta(true);
+  });
+  exportTraceButton?.addEventListener("click", exportProtocolTrace);
+  clearTraceButton?.addEventListener("click", clearProtocolTrace);
   fileInput.addEventListener("change", onFileSelected);
   githubRepoInput.value = loadGithubRepoSetting();
   githubRepoInput.addEventListener("change", () => {
@@ -1292,7 +1307,12 @@ class BaseTransport {
   async initialize() {
     await this.receive.startNotifications();
     this.receive.addEventListener("characteristicvaluechanged", (event) => {
-      this.onNotify(dataViewToBytes(event.target.value));
+      const bytes = dataViewToBytes(event.target.value);
+      traceBlePacket("rx", bytes, {
+        transportKind: this.kind,
+        characteristic: characteristicUuid(this.receive)
+      });
+      this.onNotify(bytes);
     });
   }
 
@@ -1339,6 +1359,7 @@ class BaseTransport {
 
   enqueueDecoded(data) {
     for (const message of this.decoder.feed(data)) {
+      traceGfdiPacket("rx", message, { transportKind: this.kind });
       const waiter = this.waiters.shift();
       if (waiter) waiter.resolve(message);
       else this.messages.push(message);
@@ -1359,6 +1380,14 @@ class BaseTransport {
   }
 
   async writeRawNow(bytes) {
+    const writeMethod = typeof this.send.writeValueWithoutResponse === "function"
+      ? "writeValueWithoutResponse"
+      : (typeof this.send.writeValueWithResponse === "function" ? "writeValueWithResponse" : "writeValue");
+    traceBlePacket("tx", bytes, {
+      transportKind: this.kind,
+      characteristic: characteristicUuid(this.send),
+      writeMethod
+    });
     if (typeof this.send.writeValueWithoutResponse === "function") {
       await this.send.writeValueWithoutResponse(bytes);
     } else if (typeof this.send.writeValueWithResponse === "function") {
@@ -1917,6 +1946,7 @@ async function sendSystemEvent(transport, packet, timeoutMs, signal) {
 
 async function sendGfdiChecked(transport, packet, label, signal) {
   throwIfAborted(signal);
+  traceGfdiPacket("tx", packet, { label, transportKind: transport.kind });
   await withTimeout(
     transport.sendGfdi(packet, signal),
     GFDI_WRITE_TIMEOUT_MS,
@@ -2095,6 +2125,267 @@ function parseGfdi(packet) {
   }
 
   return { kind: "generic", originalMessageType, status };
+}
+
+function traceBlePacket(direction, bytes, metadata = {}) {
+  if (!protocolTraceInput?.checked) return;
+  addProtocolTrace({
+    layer: "ble",
+    direction,
+    length: bytes.length,
+    hexPreview: bytesToHexPreview(bytes),
+    truncated: bytes.length > TRACE_HEX_PREVIEW_BYTES,
+    decode: decodeBlePacket(bytes, metadata.transportKind),
+    ...metadata
+  });
+}
+
+function traceGfdiPacket(direction, packet, metadata = {}) {
+  if (!protocolTraceInput?.checked) return;
+  addProtocolTrace({
+    layer: "gfdi",
+    direction,
+    length: packet.length,
+    hexPreview: bytesToHexPreview(packet),
+    truncated: packet.length > TRACE_HEX_PREVIEW_BYTES,
+    decode: decodeGfdiPacket(packet),
+    ...metadata
+  });
+}
+
+function addProtocolTrace(entry) {
+  const record = {
+    index: ++protocolTraceSequence,
+    timestamp: new Date().toISOString(),
+    performanceMs: Math.round(performance.now()),
+    ...entry
+  };
+  protocolTrace.push(record);
+  if (protocolTrace.length > MAX_PROTOCOL_TRACE_EVENTS) protocolTrace.shift();
+  if (protocolTrace.length <= 1 || protocolTrace.length % 25 === 0) updateTraceMeta();
+}
+
+function updateTraceMeta(forceButtons = false) {
+  if (traceMeta) {
+    const state = protocolTraceInput?.checked ? "on" : "off";
+    traceMeta.textContent = protocolTrace.length
+      ? `${protocolTrace.length} trace event(s), capture ${state}. Export after a stalled or completed run.`
+      : `No protocol trace captured; capture ${state}.`;
+  }
+  if (forceButtons || protocolTrace.length <= 1 || protocolTrace.length % 25 === 0) {
+    if (exportTraceButton) exportTraceButton.disabled = protocolTrace.length === 0;
+    if (clearTraceButton) clearTraceButton.disabled = protocolTrace.length === 0;
+  }
+}
+
+function clearProtocolTrace() {
+  protocolTrace = [];
+  protocolTraceSequence = 0;
+  updateTraceMeta(true);
+  log("Garmin protocol trace cleared.");
+}
+
+function exportProtocolTrace() {
+  if (!protocolTrace.length) return;
+  const payload = {
+    version: PROTOCOL_TRACE_VERSION,
+    exportedAt: new Date().toISOString(),
+    pageUrl: location.href,
+    userAgent: navigator.userAgent,
+    note: `Raw packet bytes are truncated to ${TRACE_HEX_PREVIEW_BYTES} preview byte(s) per event.`,
+    device: {
+      name: selectedDevice?.name || "",
+      id: selectedDevice?.id || ""
+    },
+    file: selectedFile ? { name: selectedFile.name, size: selectedFile.size } : null,
+    connection: {
+      kind: connection?.kind || "",
+      confirmed: targetConfirmed
+    },
+    settings: currentTransferSettingsForTrace(),
+    events: protocolTrace
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  const stem = sanitizeFileStem(selectedFile?.name || selectedDevice?.name || "garmin-prg");
+  anchor.href = url;
+  anchor.download = `${stem}-protocol-trace-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  log(`Exported Garmin protocol trace with ${protocolTrace.length} event(s).`);
+}
+
+function currentTransferSettingsForTrace() {
+  return {
+    apiMode: apiModeInput?.value || "",
+    pickerMode: pickerModeInput?.value || "",
+    accessMode: serviceModeInput?.value || "",
+    gfdiPacket: Number(packetSizeInput?.value || 0),
+    bleFragment: Number(fragmentSizeInput?.value || 0),
+    pipeline: Number(pipelineWindowInput?.value || 0),
+    writeDelayMs: Number(writeDelayInput?.value || 0),
+    reliableMlr: Boolean(reliableMlrInput?.checked),
+    forceLargeFragment: Boolean(forceLargeFragmentInput?.checked),
+    keepAwake: Boolean(keepAwakeInput?.checked)
+  };
+}
+
+function decodeBlePacket(bytes, transportKind = "") {
+  if (!bytes.length) return { transport: "empty" };
+  if ((bytes[0] & MLR_FLAG_MASK) !== 0) return decodeMlrPacket(bytes);
+  const kind = String(transportKind || "");
+  if (!kind.startsWith("v2")) {
+    return {
+      transport: "direct-gfdi-cobs",
+      cobsFragmentLength: bytes.length
+    };
+  }
+  const handle = bytes[0];
+  const payloadLength = Math.max(0, bytes.length - 1);
+  const decoded = {
+    transport: "ml",
+    handle,
+    payloadLength
+  };
+  if (handle === 0) decoded.management = decodeMlManagement(bytes.slice(1));
+  return decoded;
+}
+
+function decodeMlrPacket(bytes) {
+  const byte0 = bytes[0] & 0xff;
+  const byte1 = bytes.length > 1 ? bytes[1] & 0xff : 0;
+  return {
+    transport: "mlr",
+    handle: (byte0 & MLR_HANDLE_MASK) >> 4,
+    requestNumber: ((byte0 & MLR_REQ_NUM_MASK) << 2) | ((byte1 >> 6) & 0x03),
+    sequenceNumber: byte1 & MLR_SEQ_NUM_MASK,
+    payloadLength: Math.max(0, bytes.length - 2),
+    ackOnly: bytes.length <= 2
+  };
+}
+
+function decodeMlManagement(data) {
+  if (!data.length) return { requestType: null, requestName: "empty" };
+  const requestType = data[0];
+  const decoded = {
+    requestType,
+    requestName: mlRequestName(requestType)
+  };
+  if (data.length >= 9) decoded.clientId = readU64Low(data, 1);
+  if (data.length >= 11) decoded.serviceId = readU16(data, 9);
+  if (data.length >= 12) decoded.status = data[11];
+  if (data.length >= 13) decoded.handle = data[12];
+  if (data.length >= 14) decoded.reliable = data[13];
+  return decoded;
+}
+
+function decodeGfdiPacket(packet) {
+  const decoded = {
+    frameLength: packet.length
+  };
+  if (packet.length < 6) {
+    decoded.error = "too-short";
+    return decoded;
+  }
+  const declaredLength = readU16(packet, 0);
+  const expectedCrc = readU16(packet, packet.length - 2);
+  const actualCrc = garminCrc(packet.slice(0, packet.length - 2));
+  const rawMessageId = readU16(packet, 2);
+  const messageType = decodeGfdiMessageType(rawMessageId);
+  Object.assign(decoded, {
+    declaredLength,
+    lengthOk: declaredLength === packet.length,
+    rawMessageId,
+    messageType: messageType.id,
+    messageName: garminMessageName(messageType.id),
+    sequenced: messageType.sequenced,
+    sequenceHint: messageType.sequenceHint,
+    payloadLength: Math.max(0, packet.length - 6),
+    expectedCrc,
+    actualCrc,
+    crcOk: expectedCrc === actualCrc
+  });
+  if (messageType.id === GarminMessage.RESPONSE && packet.length >= 9) {
+    const status = packet[4];
+    const originalMessageType = readU16(packet, 5);
+    decoded.response = {
+      status,
+      statusName: gfdiStatusName(status),
+      originalMessageType,
+      originalMessageName: garminMessageName(originalMessageType),
+      payloadLength: Math.max(0, packet.length - 9)
+    };
+  }
+  return decoded;
+}
+
+function decodeGfdiMessageType(rawMessageId) {
+  if ((rawMessageId & 0x8000) === 0) {
+    return { id: rawMessageId, sequenced: false, sequenceHint: null };
+  }
+  return {
+    id: (rawMessageId & 0xff) + 5000,
+    sequenced: true,
+    sequenceHint: (rawMessageId >> 8) & 0x7f
+  };
+}
+
+function mlRequestName(value) {
+  const names = {
+    0x00: "REGISTER_ML_REQ",
+    0x01: "REGISTER_ML_RESP",
+    0x02: "CLOSE_HANDLE_REQ",
+    0x03: "CLOSE_HANDLE_RESP",
+    0x04: "UNKNOWN_HANDLE_RESP",
+    0x05: "CLOSE_ALL_REQ",
+    0x06: "CLOSE_ALL_RESP",
+    0xff: "PROTOCOL_ERROR"
+  };
+  return names[value] || `UNKNOWN_${value}`;
+}
+
+function garminMessageName(value) {
+  const names = {
+    [GarminMessage.RESPONSE]: "RESPONSE",
+    [GarminMessage.UPLOAD_REQUEST]: "UPLOAD_REQUEST",
+    [GarminMessage.FILE_TRANSFER_DATA]: "FILE_TRANSFER_DATA",
+    [GarminMessage.CREATE_FILE]: "CREATE_FILE",
+    [GarminMessage.SYSTEM_EVENT]: "SYSTEM_EVENT"
+  };
+  return names[value] || `MESSAGE_${value}`;
+}
+
+function gfdiStatusName(value) {
+  const names = {
+    0x00: "ACK",
+    0x01: "NAK",
+    0x02: "UNKNOWN_OR_UNSUPPORTED",
+    0x03: "COBS_DECODE_ERROR",
+    0x04: "CRC_ERROR",
+    0x05: "LENGTH_ERROR"
+  };
+  return names[value] || `STATUS_${value}`;
+}
+
+function bytesToHexPreview(bytes, limit = TRACE_HEX_PREVIEW_BYTES) {
+  return Array.from(bytes.slice(0, limit))
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join(" ");
+}
+
+function characteristicUuid(characteristic) {
+  return characteristic?.uuid || "";
+}
+
+function sanitizeFileStem(value) {
+  return String(value || "garmin-prg")
+    .replace(/\.[^.]+$/g, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "garmin-prg";
 }
 
 function garminCrc(data, initialCrc = 0) {
@@ -3110,6 +3401,8 @@ function updateButtons() {
   }
   if (stopUploadButton) stopUploadButton.disabled = !isUploading;
   if (autoTuneButton) autoTuneButton.disabled = isBusy || isScanning;
+  if (exportTraceButton) exportTraceButton.disabled = protocolTrace.length === 0;
+  if (clearTraceButton) clearTraceButton.disabled = protocolTrace.length === 0;
 }
 
 function setBusy(value) {
