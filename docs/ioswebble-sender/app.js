@@ -45,11 +45,14 @@ const MLR_REQ_NUM_MASK = 0x0f;
 const MLR_SEQ_NUM_MASK = 0x3f;
 const MLR_MAX_SEQ_NUM = 0x3f;
 const MLR_INITIAL_MAX_UNACKED_SEND = 16;
+const MLR_LARGE_FRAGMENT_INITIAL_MAX_UNACKED_SEND = 4;
 const MLR_ACK_TIMEOUT_MS = 250;
 const MLR_ACK_TRIGGER_THRESHOLD = 5;
 const MLR_INITIAL_RETRANSMISSION_TIMEOUT_MS = 1000;
 const MLR_MAX_RETRANSMISSION_TIMEOUT_MS = 20000;
 const MLR_SEND_WINDOW_TIMEOUT_MS = 8000;
+const MLR_MAX_RETRANSMISSION_EVENTS = 5;
+const MLR_LARGE_FRAGMENT_MAX_RETRANSMISSION_EVENTS = 2;
 
 const GADGETBRIDGE_CLIENT_ID = 2;
 const REQUEST_REGISTER_ML = 0;
@@ -1286,20 +1289,28 @@ class BaseTransport {
 
   receiveGfdi(timeoutMs, signal) {
     throwIfAborted(signal);
+    if (this.mlr?.failure) return Promise.reject(this.mlr.failure);
     const ready = this.messages.shift();
     if (ready) return Promise.resolve(ready);
     return new Promise((resolve, reject) => {
       let timeout = null;
       let abortHandler = null;
+      let waiter = null;
       const cleanup = () => {
         if (timeout !== null) clearTimeout(timeout);
         if (abortHandler) signal?.removeEventListener?.("abort", abortHandler);
         const index = this.waiters.indexOf(waiter);
         if (index >= 0) this.waiters.splice(index, 1);
       };
-      const waiter = (message) => {
-        cleanup();
-        resolve(message);
+      waiter = {
+        resolve: (message) => {
+          cleanup();
+          resolve(message);
+        },
+        reject: (error) => {
+          cleanup();
+          reject(error);
+        }
       };
       timeout = setTimeout(() => {
         cleanup();
@@ -1320,9 +1331,14 @@ class BaseTransport {
   enqueueDecoded(data) {
     for (const message of this.decoder.feed(data)) {
       const waiter = this.waiters.shift();
-      if (waiter) waiter(message);
+      if (waiter) waiter.resolve(message);
       else this.messages.push(message);
     }
+  }
+
+  failPendingReceives(error) {
+    const waiters = this.waiters.splice(0);
+    for (const waiter of waiters) waiter.reject(error);
   }
 
   async writeRaw(bytes) {
@@ -1460,13 +1476,18 @@ class MlrSession {
     this.nextSendSeq = 0;
     this.nextRcvSeq = 0;
     this.lastRcvAck = 0;
-    this.maxNumUnackedSend = MLR_INITIAL_MAX_UNACKED_SEND;
+    this.maxNumUnackedSend = this.initialMaxUnackedSend();
     this.retransmissionTimeoutMs = MLR_INITIAL_RETRANSMISSION_TIMEOUT_MS;
+    this.retransmissionEvents = 0;
     this.sentFragments = new Array(MLR_MAX_SEQ_NUM + 1).fill(null);
     this.windowWaiters = [];
     this.ackTimer = null;
     this.retransmissionTimer = null;
+    this.failure = null;
     this.closed = false;
+    if (this.usesLargeBleFragment()) {
+      log(`MLR large-fragment mode: BLE fragment ${this.transport.writeFragmentSize}, internal MLR window ${this.maxNumUnackedSend}.`);
+    }
   }
 
   async sendMessage(message, signal = null) {
@@ -1474,6 +1495,7 @@ class MlrSession {
     const fragmentSize = Math.max(1, this.maxPacketSize() - 2);
     for (let offset = 0; offset < message.length; offset += fragmentSize) {
       throwIfAborted(signal);
+      if (this.failure) throw this.failure;
       await this.waitForSendWindow(signal);
       const data = message.slice(offset, Math.min(message.length, offset + fragmentSize));
       const reqNum = this.nextRcvSeq;
@@ -1487,7 +1509,7 @@ class MlrSession {
   }
 
   onPacketReceived(packet) {
-    if (packet.length < 2 || this.closed) return;
+    if (packet.length < 2 || this.closed || this.failure) return;
     const byte0 = packet[0] & 0xff;
     const byte1 = packet[1] & 0xff;
     const packetHandle = (byte0 & MLR_HANDLE_MASK) >> 4;
@@ -1522,12 +1544,14 @@ class MlrSession {
       this.sentFragments[seq] = null;
     }
     this.lastRcvAck = reqNum;
+    this.retransmissionEvents = 0;
     this.stopRetransmissionTimer();
     if (this.lastRcvAck !== this.nextSendSeq) this.startRetransmissionTimer();
     this.notifyWindowWaiters();
   }
 
   async waitForSendWindow(signal) {
+    if (this.failure) throw this.failure;
     while (!this.closed && this.numSentUnacked() >= this.maxNumUnackedSend) {
       await withTimeout(
         new Promise((resolve) => this.windowWaiters.push(resolve)),
@@ -1535,7 +1559,9 @@ class MlrSession {
         "Timed out waiting for MLR send window",
         signal
       );
+      if (this.failure) throw this.failure;
     }
+    if (this.failure) throw this.failure;
     if (this.closed) throw new Error("MLR transport is closed.");
   }
 
@@ -1574,6 +1600,14 @@ class MlrSession {
 
   onRetransmissionTimeout() {
     if (this.closed) return;
+    this.retransmissionEvents += 1;
+    const maxEvents = this.usesLargeBleFragment()
+      ? MLR_LARGE_FRAGMENT_MAX_RETRANSMISSION_EVENTS
+      : MLR_MAX_RETRANSMISSION_EVENTS;
+    if (this.retransmissionEvents >= maxEvents) {
+      this.fail(new Error(`MLR retransmission limit reached with BLE fragment ${this.transport.writeFragmentSize}. Reconnect and retry with a smaller BLE fragment.`));
+      return;
+    }
     this.retransmissionTimeoutMs = Math.min(this.retransmissionTimeoutMs * 2, MLR_MAX_RETRANSMISSION_TIMEOUT_MS);
     this.maxNumUnackedSend = Math.max(1, Math.floor(this.maxNumUnackedSend / 2));
     log(`MLR retransmission timeout; window now ${this.maxNumUnackedSend}.`);
@@ -1599,6 +1633,16 @@ class MlrSession {
     return Math.max(3, this.transport.writeFragmentSize || 20);
   }
 
+  initialMaxUnackedSend() {
+    return this.usesLargeBleFragment()
+      ? MLR_LARGE_FRAGMENT_INITIAL_MAX_UNACKED_SEND
+      : MLR_INITIAL_MAX_UNACKED_SEND;
+  }
+
+  usesLargeBleFragment() {
+    return (this.transport.writeFragmentSize || SAFE_BLE_FRAGMENT_SIZE) > SAFE_BLE_FRAGMENT_SIZE;
+  }
+
   numSentUnacked() {
     return this.sequenceDistance(this.lastRcvAck, this.nextSendSeq);
   }
@@ -1614,6 +1658,19 @@ class MlrSession {
   notifyWindowWaiters() {
     const waiters = this.windowWaiters.splice(0);
     for (const resolve of waiters) resolve();
+  }
+
+  fail(error) {
+    if (this.failure || this.closed) return;
+    this.failure = error;
+    this.stopRetransmissionTimer();
+    if (this.ackTimer) {
+      window.clearTimeout(this.ackTimer);
+      this.ackTimer = null;
+    }
+    log(messageOf(error));
+    this.transport.failPendingReceives(error);
+    this.notifyWindowWaiters();
   }
 
   close() {
