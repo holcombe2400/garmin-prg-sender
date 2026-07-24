@@ -786,14 +786,24 @@ async function sendPrg() {
     foregroundWarning.textContent = "Keep Bluefy open in the foreground until upload reaches 100%. Calls, lock screen, or app switching can break the transfer.";
     await requestWakeLock("upload start");
     setProgress(0, 0, selectedFile.size);
+    let uploadStats = null;
+    const maxPacketSize = readNumber(packetSizeInput, 375);
+    const fragmentSize = readNumber(fragmentSizeInput, 20);
+    const writeDelayMs = readNumber(writeDelayInput, 0);
+    log(`Upload settings: GFDI packet ${maxPacketSize}, BLE fragment ${fragmentSize}, write delay ${writeDelayMs} ms.`);
     await uploadPrg(selectedFile.data, connection, {
-      maxPacketSize: readNumber(packetSizeInput, 375),
+      maxPacketSize,
       timeoutMs: 30000,
       maxRetries: 5,
-      onProgress: ({ offset, total }) => setProgress(Math.floor((100 * offset) / total), offset, total)
+      onProgress: ({ offset, total }) => {
+        if (!uploadStats) uploadStats = createTransferStats(total);
+        setProgress(Math.floor((100 * offset) / total), offset, total, uploadStats);
+      }
     });
-    setProgress(100, selectedFile.size, selectedFile.size);
-    setStatus("Upload complete. Let Garmin Connect reconnect to register the app.");
+    setProgress(100, selectedFile.size, selectedFile.size, uploadStats);
+    const transferSummary = uploadStats ? completedTransferSummary(uploadStats, selectedFile.size) : "";
+    setStatus(transferSummary ? `Upload complete. ${transferSummary} Let Garmin Connect reconnect to register the app.` : "Upload complete. Let Garmin Connect reconnect to register the app.");
+    if (transferSummary) log(transferSummary);
     log("Upload complete. Garmin Connect must perform the registration pass.");
   } catch (error) {
     showError("Upload failed", error);
@@ -1713,11 +1723,60 @@ function setStatus(text) {
   statusText.textContent = text;
 }
 
-function setProgress(percent, offset, total) {
+function setProgress(percent, offset, total, stats = null) {
   const clean = Math.max(0, Math.min(100, percent));
   progressBar.value = clean;
   progressText.textContent = `${clean}%`;
-  if (total > 0) setStatus(`Uploaded ${offset.toLocaleString()} / ${total.toLocaleString()} bytes`);
+  if (total > 0) {
+    const parts = [`Uploaded ${formatBytes(offset)} / ${formatBytes(total)}`];
+    const metrics = stats ? updateTransferStats(stats, offset) : null;
+    if (metrics?.avgBps > 0) {
+      parts.push(`avg ${formatRate(metrics.avgBps)}`);
+      if (metrics.recentBps > 0) parts.push(`now ${formatRate(metrics.recentBps)}`);
+      if (offset < total && metrics.etaSec !== null) parts.push(`ETA ${formatDuration(metrics.etaSec)}`);
+    }
+    setStatus(parts.join(" - "));
+  }
+}
+
+function createTransferStats(total) {
+  const now = performance.now();
+  return {
+    total,
+    startedAt: now,
+    samples: [{ time: now, offset: 0 }]
+  };
+}
+
+function updateTransferStats(stats, offset) {
+  const now = performance.now();
+  const cleanOffset = Math.max(0, Math.min(offset, stats.total));
+  const samples = stats.samples;
+  const last = samples[samples.length - 1];
+  if (!last || last.offset !== cleanOffset) {
+    samples.push({ time: now, offset: cleanOffset });
+  }
+  const cutoff = now - 10000;
+  while (samples.length > 2 && samples[0].time < cutoff) {
+    samples.shift();
+  }
+
+  const elapsedSec = Math.max((now - stats.startedAt) / 1000, 0);
+  const avgBps = elapsedSec > 0.25 ? cleanOffset / elapsedSec : 0;
+  const firstSample = samples[0];
+  const recentElapsedSec = Math.max((now - firstSample.time) / 1000, 0);
+  const recentBps = recentElapsedSec > 0.25 ? (cleanOffset - firstSample.offset) / recentElapsedSec : 0;
+  const etaBps = recentBps > 0 ? recentBps : avgBps;
+  const remaining = Math.max(0, stats.total - cleanOffset);
+  const etaSec = etaBps > 1 ? remaining / etaBps : null;
+
+  return { avgBps, recentBps, etaSec, elapsedSec };
+}
+
+function completedTransferSummary(stats, total) {
+  const elapsedSec = Math.max((performance.now() - stats.startedAt) / 1000, 0);
+  const avgBps = elapsedSec > 0 ? total / elapsedSec : 0;
+  return `Transfer rate: ${formatRate(avgBps)} average over ${formatDuration(elapsedSec)}.`;
 }
 
 function updateWatchIdentity(transportTextValue) {
@@ -1993,6 +2052,24 @@ function formatBytes(size) {
   if (size < 1024) return `${size} bytes`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function formatRate(bytesPerSecond) {
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return "? KB/s";
+  if (bytesPerSecond < 1024 * 1024) return `${(bytesPerSecond / 1024).toFixed(1)} KB/s`;
+  return `${(bytesPerSecond / 1024 / 1024).toFixed(2)} MB/s`;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "?";
+  const totalSeconds = Math.round(seconds);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  if (minutes <= 0) return `${remainingSeconds}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours <= 0) return `${minutes}m ${remainingSeconds}s`;
+  return `${hours}h ${remainingMinutes}m`;
 }
 
 function selectedPrgMetaText(name, size, source = "") {
