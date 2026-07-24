@@ -116,6 +116,7 @@ const rememberWatchButton = document.querySelector("#rememberWatchButton");
 const clearWatchButton = document.querySelector("#clearWatchButton");
 const autoTuneButton = document.querySelector("#autoTuneButton");
 const benchmarkSendButton = document.querySelector("#benchmarkSendButton");
+const retryButton = document.querySelector("#retryButton");
 const riskyPipelineInput = document.querySelector("#riskyPipelineInput");
 const progressBar = document.querySelector("#progressBar");
 const progressText = document.querySelector("#progressText");
@@ -153,6 +154,8 @@ let savedPrgRecords = [];
 let githubPrgAssets = [];
 let isUploading = false;
 let wakeLock = null;
+let lastUploadRequest = null;
+let retryAvailable = false;
 
 init().catch((error) => showError("Startup failed", error));
 
@@ -205,6 +208,7 @@ async function init() {
   clearWatchButton.addEventListener("click", clearTrustedWatch);
   autoTuneButton?.addEventListener("click", autoTuneSettings);
   benchmarkSendButton?.addEventListener("click", () => sendPrg({ benchmark: true }));
+  retryButton?.addEventListener("click", retryLastUpload);
   confirmTargetInput.addEventListener("change", () => {
     targetConfirmed = confirmTargetInput.checked;
     if (targetConfirmed && selectedDevice) {
@@ -800,9 +804,13 @@ async function connectWatch() {
   }
 }
 
-async function sendPrg({ benchmark = false } = {}) {
+async function sendPrg({ benchmark = false, retry = false } = {}) {
   if (!selectedFile || !connection || !targetConfirmed || hasTrustedMismatch()) return;
-  const failedBenchmarkProfiles = new Set();
+  const failedBenchmarkProfiles = retry && lastUploadRequest?.benchmark === benchmark
+    ? new Set(lastUploadRequest.failedBenchmarkProfiles || [])
+    : new Set();
+  rememberUploadRequest(benchmark, failedBenchmarkProfiles);
+  setRetryAvailable(false);
   try {
     isUploading = true;
     setBusy(true);
@@ -812,17 +820,22 @@ async function sendPrg({ benchmark = false } = {}) {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         await sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt });
+        clearRetryState();
         return;
       } catch (error) {
+        if (benchmark && error?.benchmarkProfile) {
+          failedBenchmarkProfiles.add(benchmarkProfileKey(error.benchmarkProfile));
+          rememberUploadRequest(benchmark, failedBenchmarkProfiles);
+        }
         if (!benchmark || !error?.benchmarkProfile || attempt >= maxAttempts) throw error;
         const profile = error.benchmarkProfile;
-        failedBenchmarkProfiles.add(benchmarkProfileKey(profile));
         log(`Benchmark profile failed and will be skipped: ${profile.label}. ${messageOf(error.cause || error)}`);
         setStatus(`Benchmark profile failed: ${profile.label}. Reconnecting and trying the next setting...`);
         await reconnectForBenchmarkRetry(currentUploadSettings());
       }
     }
   } catch (error) {
+    setRetryAvailable(true);
     showError("Upload failed", error);
   } finally {
     isUploading = false;
@@ -887,10 +900,33 @@ async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt }) {
 }
 
 async function reconnectForBenchmarkRetry(settings) {
+  return reconnectForRetry(settings, "benchmark retry");
+}
+
+async function retryLastUpload() {
+  if (!lastUploadRequest || !selectedFile || !selectedDevice || hasTrustedMismatch()) return;
+  const benchmark = Boolean(lastUploadRequest.benchmark);
+  const settings = currentUploadSettings();
+  try {
+    setBusy(true);
+    setStatus("Retrying: reconnecting to watch...");
+    log(`Retry requested for ${benchmark ? "Benchmark Send" : "Send PRG"}.`);
+    await reconnectForRetry(settings, "manual retry");
+  } catch (error) {
+    setRetryAvailable(true);
+    showError("Retry reconnect failed", error);
+    return;
+  } finally {
+    setBusy(false);
+  }
+  await sendPrg({ benchmark, retry: true });
+}
+
+async function reconnectForRetry(settings, reason) {
   try {
     selectedDevice?.gatt?.disconnect?.();
   } catch (error) {
-    log(`Disconnect before benchmark retry failed: ${messageOf(error)}`);
+    log(`Disconnect before ${reason} failed: ${messageOf(error)}`);
   }
   connection = null;
   setTargetConfirmed(false);
@@ -904,7 +940,7 @@ async function reconnectForBenchmarkRetry(settings) {
   updateTrustedWatchUi();
   if (hasTrustedMismatch()) throw new Error("Reconnected device does not match the trusted watch.");
   setTargetConfirmed(true);
-  log(`Reconnected using Garmin ${connection.kind} transport for benchmark retry.`);
+  log(`Reconnected using Garmin ${connection.kind} transport for ${reason}.`);
 }
 
 async function requestWakeLock(reason) {
@@ -2115,6 +2151,26 @@ function autoTuneSettings() {
   log(`${message} Successful uploads will update the best setting automatically.`);
 }
 
+function rememberUploadRequest(benchmark, failedBenchmarkProfiles = new Set()) {
+  lastUploadRequest = {
+    benchmark: Boolean(benchmark),
+    failedBenchmarkProfiles: Array.from(failedBenchmarkProfiles)
+  };
+}
+
+function setRetryAvailable(value) {
+  retryAvailable = Boolean(value && lastUploadRequest);
+  if (retryButton) retryButton.textContent = lastUploadRequest?.benchmark ? "Retry Benchmark" : "Retry Send";
+  updateButtons();
+}
+
+function clearRetryState() {
+  retryAvailable = false;
+  lastUploadRequest = null;
+  if (retryButton) retryButton.textContent = "Retry";
+  updateButtons();
+}
+
 function currentUploadSettings() {
   return {
     maxPacketSize: readGfdiPacketSize(),
@@ -2378,6 +2434,7 @@ function updateButtons() {
   confirmTargetInput.disabled = isBusy || isScanning || !connection || hasTrustedMismatch();
   sendButton.disabled = isBusy || isScanning || !selectedFile || !connection || !targetConfirmed || hasTrustedMismatch();
   if (benchmarkSendButton) benchmarkSendButton.disabled = sendButton.disabled;
+  if (retryButton) retryButton.disabled = isBusy || isScanning || !retryAvailable || !selectedFile || !selectedDevice || hasTrustedMismatch();
   if (autoTuneButton) autoTuneButton.disabled = isBusy || isScanning;
 }
 

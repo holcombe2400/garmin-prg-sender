@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG WebBLE Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260724-whole-profile-benchmark">
+    <link rel="stylesheet" href="./styles.css?v=20260724-retry-button">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260724-whole-profile-benchmark"></script>
+    <script type="module" src="./app.js?v=20260724-retry-button"></script>
   </head>
   <body>
     <main class="app">
@@ -140,6 +140,7 @@
         <div class="row send-actions">
           <button id="autoTuneButton" type="button" class="secondary">Auto Tune</button>
           <button id="benchmarkSendButton" type="button" class="secondary" disabled>Benchmark Send</button>
+          <button id="retryButton" type="button" class="secondary" disabled>Retry</button>
           <button id="sendButton" class="primary" type="button" disabled>Send PRG</button>
         </div>
         <div class="progress-row">
