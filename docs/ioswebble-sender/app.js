@@ -28,6 +28,17 @@ const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 6;
 const WIFI_PROBE_TIMEOUT_MS = 3500;
 const WIFI_MAX_PORTS = 12;
+const MLR_FLAG_MASK = 0x80;
+const MLR_HANDLE_MASK = 0x70;
+const MLR_REQ_NUM_MASK = 0x0f;
+const MLR_SEQ_NUM_MASK = 0x3f;
+const MLR_MAX_SEQ_NUM = 0x3f;
+const MLR_INITIAL_MAX_UNACKED_SEND = 16;
+const MLR_ACK_TIMEOUT_MS = 250;
+const MLR_ACK_TRIGGER_THRESHOLD = 5;
+const MLR_INITIAL_RETRANSMISSION_TIMEOUT_MS = 1000;
+const MLR_MAX_RETRANSMISSION_TIMEOUT_MS = 20000;
+const MLR_SEND_WINDOW_TIMEOUT_MS = 8000;
 
 const GADGETBRIDGE_CLIENT_ID = 2;
 const REQUEST_REGISTER_ML = 0;
@@ -121,6 +132,7 @@ const benchmarkSendButton = document.querySelector("#benchmarkSendButton");
 const retryButton = document.querySelector("#retryButton");
 const stopUploadButton = document.querySelector("#stopUploadButton");
 const riskyPipelineInput = document.querySelector("#riskyPipelineInput");
+const reliableMlrInput = document.querySelector("#reliableMlrInput");
 const progressBar = document.querySelector("#progressBar");
 const progressText = document.querySelector("#progressText");
 const statusText = document.querySelector("#statusText");
@@ -954,7 +966,8 @@ async function connectWatch() {
     setStatus("Connecting...");
     connection = await connectGarminTransport(selectedDevice, {
       writeFragmentSize: readNumber(fragmentSizeInput, 20),
-      writeDelayMs: readNumber(writeDelayInput, 0)
+      writeDelayMs: readNumber(writeDelayInput, 0),
+      reliableMlr: Boolean(reliableMlrInput?.checked)
     });
     setTargetConfirmed(false);
     updateWatchIdentity(`Connected using Garmin ${connection.kind}`);
@@ -1123,6 +1136,7 @@ async function stopActiveUpload(message) {
   log(`${message || "Stopping upload."} Disconnecting watch to break the active transfer.`);
   uploadAbortController?.abort?.();
   try {
+    connection?.close?.();
     selectedDevice?.gatt?.disconnect?.();
   } catch (error) {
     log(`Disconnect during stop failed: ${messageOf(error)}`);
@@ -1142,6 +1156,7 @@ async function waitForUploadIdle(timeoutMs) {
 
 async function reconnectForRetry(settings, reason) {
   try {
+    connection?.close?.();
     selectedDevice?.gatt?.disconnect?.();
   } catch (error) {
     log(`Disconnect before ${reason} failed: ${messageOf(error)}`);
@@ -1152,7 +1167,8 @@ async function reconnectForRetry(settings, reason) {
   await sleep(1500);
   connection = await connectGarminTransport(selectedDevice, {
     writeFragmentSize: settings.fragmentSize,
-    writeDelayMs: settings.writeDelayMs
+    writeDelayMs: settings.writeDelayMs,
+    reliableMlr: Boolean(reliableMlrInput?.checked)
   });
   updateWatchIdentity(`Connected using Garmin ${connection.kind}`);
   updateTrustedWatchUi();
@@ -1308,9 +1324,10 @@ class V1Transport extends BaseTransport {
     this.enqueueDecoded(data);
   }
 
-  async sendGfdi(packet) {
+  async sendGfdi(packet, signal = null) {
     const encoded = cobsEncode(packet);
     for (let offset = 0; offset < encoded.length; offset += this.writeFragmentSize) {
+      throwIfAborted(signal);
       await this.writeRaw(encoded.slice(offset, offset + this.writeFragmentSize));
     }
   }
@@ -1320,16 +1337,23 @@ class V2Transport extends BaseTransport {
   constructor(receive, send, options) {
     super(receive, send, "v2", options);
     this.gfdiHandle = null;
+    this.reliableMlrRequested = Boolean(options.reliableMlr);
+    this.mlr = null;
   }
 
   async initialize() {
     await super.initialize();
+    if (this.reliableMlrRequested) log("Requesting reliable MLR mode for Garmin GFDI.");
     await this.writeRaw(closeAllServices());
     await this.waitForGfdiHandle(15000);
   }
 
   onNotify(value) {
     if (!value.length) return;
+    if ((value[0] & MLR_FLAG_MASK) !== 0 && this.mlr) {
+      this.mlr.onPacketReceived(value);
+      return;
+    }
     const handle = value[0];
     const body = value.slice(1);
     if (handle === 0) {
@@ -1341,14 +1365,23 @@ class V2Transport extends BaseTransport {
     }
   }
 
-  async sendGfdi(packet) {
+  async sendGfdi(packet, signal = null) {
     if (this.gfdiHandle === null) throw new Error("v2 GFDI handle is not registered.");
     const encoded = cobsEncode(packet);
+    if (this.mlr) {
+      await this.mlr.sendMessage(encoded, signal);
+      return;
+    }
     const fragmentSize = Math.max(1, this.writeFragmentSize - 1);
     for (let offset = 0; offset < encoded.length; offset += fragmentSize) {
+      throwIfAborted(signal);
       const fragment = encoded.slice(offset, offset + fragmentSize);
       await this.writeRaw(concatBytes(Uint8Array.of(this.gfdiHandle), fragment));
     }
+  }
+
+  close() {
+    this.mlr?.close?.();
   }
 
   handleManagement(data) {
@@ -1357,7 +1390,7 @@ class V2Transport extends BaseTransport {
     const clientId = readU64Low(data, 1);
     if (clientId !== GADGETBRIDGE_CLIENT_ID) return;
     if (requestType === REQUEST_CLOSE_ALL_RESP) {
-      this.writeRaw(registerService(SERVICE_GFDI, false)).catch((error) => {
+      this.writeRaw(registerService(SERVICE_GFDI, this.reliableMlrRequested)).catch((error) => {
         this.handleReject?.(error);
       });
       return;
@@ -1373,11 +1406,14 @@ class V2Transport extends BaseTransport {
         this.handleReject?.(new Error(`Watch rejected v2 GFDI registration with status ${status}`));
         return;
       }
-      if (reliable) {
-        this.handleReject?.(new Error("Watch registered GFDI as reliable MLR; this sender only implements unreliable ML."));
-        return;
-      }
       this.gfdiHandle = handle;
+      if (reliable) {
+        this.mlr = new MlrSession(this, handle);
+        this.kind = "v2 reliable MLR";
+        log(`Garmin GFDI registered in reliable MLR mode; handle=${handle}.`);
+      } else if (this.reliableMlrRequested) {
+        log("Watch accepted GFDI but did not enable reliable MLR; using regular v2 ML.");
+      }
       this.handleResolve?.();
     }
   }
@@ -1395,6 +1431,179 @@ class V2Transport extends BaseTransport {
         reject(error);
       };
     });
+  }
+}
+
+class MlrSession {
+  constructor(transport, handle) {
+    this.transport = transport;
+    this.handle = handle;
+    this.lastSendAck = 0;
+    this.nextSendSeq = 0;
+    this.nextRcvSeq = 0;
+    this.lastRcvAck = 0;
+    this.maxNumUnackedSend = MLR_INITIAL_MAX_UNACKED_SEND;
+    this.retransmissionTimeoutMs = MLR_INITIAL_RETRANSMISSION_TIMEOUT_MS;
+    this.sentFragments = new Array(MLR_MAX_SEQ_NUM + 1).fill(null);
+    this.windowWaiters = [];
+    this.ackTimer = null;
+    this.retransmissionTimer = null;
+    this.closed = false;
+  }
+
+  async sendMessage(message, signal = null) {
+    if (!message?.length) return;
+    const fragmentSize = Math.max(1, this.maxPacketSize() - 2);
+    for (let offset = 0; offset < message.length; offset += fragmentSize) {
+      throwIfAborted(signal);
+      await this.waitForSendWindow(signal);
+      const data = message.slice(offset, Math.min(message.length, offset + fragmentSize));
+      const reqNum = this.nextRcvSeq;
+      const seqNum = this.nextSendSeq;
+      const packet = this.createPacket(reqNum, seqNum, data);
+      this.sentFragments[seqNum] = { packet, reqNum, seqNum };
+      this.nextSendSeq = this.nextSeq(this.nextSendSeq);
+      await this.transport.writeRaw(packet);
+      if (this.numSentUnacked() === 1) this.startRetransmissionTimer();
+    }
+  }
+
+  onPacketReceived(packet) {
+    if (packet.length < 2 || this.closed) return;
+    const byte0 = packet[0] & 0xff;
+    const byte1 = packet[1] & 0xff;
+    const packetHandle = (byte0 & MLR_HANDLE_MASK) >> 4;
+    if (packetHandle !== (this.handle & 0x07)) {
+      log(`Ignoring MLR packet for handle ${packetHandle}; expected ${this.handle & 0x07}.`);
+      return;
+    }
+    const reqNum = ((byte0 & MLR_REQ_NUM_MASK) << 2) | ((byte1 >> 6) & 0x03);
+    const seqNum = byte1 & MLR_SEQ_NUM_MASK;
+    if (reqNum !== this.lastRcvAck) this.processAck(reqNum);
+    if (packet.length <= 2) return;
+
+    if (seqNum === this.nextRcvSeq) {
+      this.transport.enqueueDecoded(packet.slice(2));
+      this.nextRcvSeq = this.nextSeq(this.nextRcvSeq);
+      this.scheduleAckIfNeeded();
+    } else {
+      log(`MLR out-of-sequence packet; expected ${this.nextRcvSeq}, got ${seqNum}.`);
+      this.sendAckPacket();
+    }
+  }
+
+  processAck(reqNum) {
+    const numAcked = this.sequenceDistance(this.lastRcvAck, reqNum);
+    const numUnacked = this.numSentUnacked();
+    if (numAcked === 0) return;
+    if (numAcked > numUnacked) {
+      log(`Ignoring MLR ACK ${reqNum}; only ${numUnacked} packet(s) unacked.`);
+      return;
+    }
+    for (let seq = this.lastRcvAck; seq !== reqNum; seq = this.nextSeq(seq)) {
+      this.sentFragments[seq] = null;
+    }
+    this.lastRcvAck = reqNum;
+    this.stopRetransmissionTimer();
+    if (this.lastRcvAck !== this.nextSendSeq) this.startRetransmissionTimer();
+    this.notifyWindowWaiters();
+  }
+
+  async waitForSendWindow(signal) {
+    while (!this.closed && this.numSentUnacked() >= this.maxNumUnackedSend) {
+      await withTimeout(
+        new Promise((resolve) => this.windowWaiters.push(resolve)),
+        MLR_SEND_WINDOW_TIMEOUT_MS,
+        "Timed out waiting for MLR send window",
+        signal
+      );
+    }
+    if (this.closed) throw new Error("MLR transport is closed.");
+  }
+
+  scheduleAckIfNeeded() {
+    if (this.ackTimer) window.clearTimeout(this.ackTimer);
+    const numRcvdUnacked = this.sequenceDistance(this.lastSendAck, this.nextRcvSeq);
+    if (numRcvdUnacked >= MLR_ACK_TRIGGER_THRESHOLD) {
+      this.sendAckPacket();
+    } else {
+      this.ackTimer = window.setTimeout(() => this.sendAckPacket(), MLR_ACK_TIMEOUT_MS);
+    }
+  }
+
+  sendAckPacket() {
+    if (this.closed) return;
+    if (this.ackTimer) {
+      window.clearTimeout(this.ackTimer);
+      this.ackTimer = null;
+    }
+    const packet = this.createPacket(this.nextRcvSeq, 0, new Uint8Array(0));
+    this.transport.writeRaw(packet).catch((error) => log(`MLR ACK write failed: ${messageOf(error)}`));
+    this.lastSendAck = this.nextRcvSeq;
+  }
+
+  startRetransmissionTimer() {
+    this.stopRetransmissionTimer();
+    this.retransmissionTimer = window.setTimeout(() => this.onRetransmissionTimeout(), this.retransmissionTimeoutMs);
+  }
+
+  stopRetransmissionTimer() {
+    if (this.retransmissionTimer) {
+      window.clearTimeout(this.retransmissionTimer);
+      this.retransmissionTimer = null;
+    }
+  }
+
+  onRetransmissionTimeout() {
+    if (this.closed) return;
+    this.retransmissionTimeoutMs = Math.min(this.retransmissionTimeoutMs * 2, MLR_MAX_RETRANSMISSION_TIMEOUT_MS);
+    this.maxNumUnackedSend = Math.max(1, Math.floor(this.maxNumUnackedSend / 2));
+    log(`MLR retransmission timeout; window now ${this.maxNumUnackedSend}.`);
+    for (let seq = this.lastRcvAck; seq !== this.nextSendSeq; seq = this.nextSeq(seq)) {
+      const fragment = this.sentFragments[seq];
+      if (fragment?.packet) {
+        this.transport.writeRaw(fragment.packet).catch((error) => log(`MLR retransmission failed: ${messageOf(error)}`));
+      }
+    }
+    this.startRetransmissionTimer();
+    this.notifyWindowWaiters();
+  }
+
+  createPacket(reqNum, seqNum, data) {
+    const packet = new Uint8Array(2 + data.length);
+    packet[0] = MLR_FLAG_MASK | ((this.handle & 0x07) << 4) | ((reqNum >> 2) & MLR_REQ_NUM_MASK);
+    packet[1] = ((reqNum & 0x03) << 6) | (seqNum & MLR_SEQ_NUM_MASK);
+    packet.set(data, 2);
+    return packet;
+  }
+
+  maxPacketSize() {
+    return Math.max(3, this.transport.writeFragmentSize || 20);
+  }
+
+  numSentUnacked() {
+    return this.sequenceDistance(this.lastRcvAck, this.nextSendSeq);
+  }
+
+  sequenceDistance(from, to) {
+    return (to - from + MLR_MAX_SEQ_NUM + 1) % (MLR_MAX_SEQ_NUM + 1);
+  }
+
+  nextSeq(value) {
+    return (value + 1) & MLR_MAX_SEQ_NUM;
+  }
+
+  notifyWindowWaiters() {
+    const waiters = this.windowWaiters.splice(0);
+    for (const resolve of waiters) resolve();
+  }
+
+  close() {
+    this.closed = true;
+    if (this.ackTimer) window.clearTimeout(this.ackTimer);
+    this.stopRetransmissionTimer();
+    this.notifyWindowWaiters();
+    this.sentFragments.fill(null);
   }
 }
 
@@ -1591,7 +1800,7 @@ async function sendSystemEvent(transport, packet, timeoutMs, signal) {
 async function sendGfdiChecked(transport, packet, label, signal) {
   throwIfAborted(signal);
   await withTimeout(
-    transport.sendGfdi(packet),
+    transport.sendGfdi(packet, signal),
     GFDI_WRITE_TIMEOUT_MS,
     `${label} write timed out after ${Math.round(GFDI_WRITE_TIMEOUT_MS / 1000)}s`,
     signal
