@@ -5,6 +5,7 @@ const MAX_EXPECTED_PRG_SIZE = 10 * 1024 * 1024;
 const LARGE_PRG_WARNING_SIZE = 4 * 1024 * 1024;
 const SAFE_GFDI_PACKET_SIZE = 375;
 const MAX_EXPERIMENTAL_GFDI_PACKET_SIZE = 1500;
+const SAFE_BLE_FRAGMENT_SIZE = 20;
 const TRUSTED_DEVICE_KEY = "garminPrgSender.trustedDevice";
 const SAVED_PRG_DB_NAME = "garminPrgSender.savedPrgs";
 const SAVED_PRG_DB_VERSION = 1;
@@ -16,7 +17,7 @@ const TUNING_HISTORY_KEY = "garminPrgSender.tuningHistory";
 const MAX_TUNING_HISTORY = 20;
 const FAST_FENIX6_TUNING = Object.freeze({
   maxPacketSize: 400,
-  fragmentSize: 180,
+  fragmentSize: SAFE_BLE_FRAGMENT_SIZE,
   pipelineWindow: 2,
   writeDelayMs: 0,
   label: "fenix 6 fast preset"
@@ -1252,7 +1253,7 @@ class BaseTransport {
     this.receive = receive;
     this.send = send;
     this.kind = kind;
-    this.writeFragmentSize = clampNumber(options.writeFragmentSize, 20, 180, 20);
+    this.writeFragmentSize = clampNumber(options.writeFragmentSize, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
     this.writeDelayMs = clampNumber(options.writeDelayMs, 0, 25, 0);
     this.decoder = new CobsDecoder();
     this.messages = [];
@@ -2646,25 +2647,25 @@ function applyTuningSettings(settings) {
 
 function applyTransportSettings(transport, settings) {
   if (!transport) return;
-  transport.writeFragmentSize = clampNumber(settings.fragmentSize, 20, 180, 20);
+  transport.writeFragmentSize = clampNumber(settings.fragmentSize, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
   transport.writeDelayMs = clampNumber(settings.writeDelayMs, 0, 25, 0);
 }
 
 function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set()) {
   const stableProfiles = [
-    { maxPacketSize: 375, fragmentSize: 180, pipelineWindow: 1, writeDelayMs: 0, label: "375/180/1/0" },
-    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 1, writeDelayMs: 0, label: "400/180/1/0" },
-    { maxPacketSize: 375, fragmentSize: 180, pipelineWindow: 2, writeDelayMs: 0, label: "375/180/2/0" },
-    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 2, writeDelayMs: 0, label: "400/180/2/0" },
-    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 2, writeDelayMs: 2, label: "400/180/2/2" },
-    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 2, writeDelayMs: 5, label: "400/180/2/5" }
+    { maxPacketSize: 375, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 1, writeDelayMs: 0, label: "375/20/1/0" },
+    { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 1, writeDelayMs: 0, label: "400/20/1/0" },
+    { maxPacketSize: 375, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "375/20/2/0" },
+    { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 0, label: "400/20/2/0" },
+    { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 2, label: "400/20/2/2" },
+    { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 2, writeDelayMs: 5, label: "400/20/2/5" }
   ];
   const riskyProfiles = riskyPipelineInput?.checked ? [
-    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 3, writeDelayMs: 5, label: "risky 400/180/3/5" },
-    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 3, writeDelayMs: 10, label: "risky 400/180/3/10" },
-    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 3, writeDelayMs: 15, label: "risky 400/180/3/15" },
-    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 4, writeDelayMs: 10, label: "risky 400/180/4/10" },
-    { maxPacketSize: 400, fragmentSize: 180, pipelineWindow: 4, writeDelayMs: 15, label: "risky 400/180/4/15" }
+    { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 3, writeDelayMs: 5, label: "risky 400/20/3/5" },
+    { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 3, writeDelayMs: 10, label: "risky 400/20/3/10" },
+    { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 3, writeDelayMs: 15, label: "risky 400/20/3/15" },
+    { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 4, writeDelayMs: 10, label: "risky 400/20/4/10" },
+    { maxPacketSize: 400, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 4, writeDelayMs: 15, label: "risky 400/20/4/15" }
   ] : [];
   const profiles = riskyPipelineInput?.checked
     ? [...riskyProfiles, FAST_FENIX6_TUNING, ...stableProfiles, baseSettings]
@@ -2684,7 +2685,7 @@ function uniqueBenchmarkProfiles(profiles) {
   for (const profile of profiles) {
     const normalized = {
       maxPacketSize: clampNumber(profile.maxPacketSize, 64, MAX_EXPERIMENTAL_GFDI_PACKET_SIZE, SAFE_GFDI_PACKET_SIZE),
-      fragmentSize: clampNumber(profile.fragmentSize, 20, 180, 20),
+      fragmentSize: clampNumber(profile.fragmentSize, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE),
       pipelineWindow: clampNumber(profile.pipelineWindow, 1, 8, 1),
       writeDelayMs: clampNumber(profile.writeDelayMs, 0, 25, 0),
       label: profile.label || `${profile.maxPacketSize}/${profile.fragmentSize}/${profile.pipelineWindow}/${profile.writeDelayMs}`
@@ -2748,8 +2749,8 @@ function isValidTuningResult(value) {
     && Number.isFinite(value.avgBps)
     && value.maxPacketSize >= 64
     && value.maxPacketSize <= MAX_EXPERIMENTAL_GFDI_PACKET_SIZE
-    && value.fragmentSize >= 20
-    && value.fragmentSize <= 180
+    && value.fragmentSize >= SAFE_BLE_FRAGMENT_SIZE
+    && value.fragmentSize <= SAFE_BLE_FRAGMENT_SIZE
     && value.pipelineWindow >= 1
     && value.pipelineWindow <= 8
     && value.writeDelayMs >= 0
@@ -2925,7 +2926,7 @@ function readGfdiPacketSize() {
 }
 
 function readBleFragmentSize() {
-  const value = clampNumber(fragmentSizeInput.value, 20, 180, 20);
+  const value = clampNumber(fragmentSizeInput.value, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
   fragmentSizeInput.value = String(value);
   return value;
 }
