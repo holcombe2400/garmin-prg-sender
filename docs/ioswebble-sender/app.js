@@ -1543,8 +1543,7 @@ class MlrSession {
     const numUnacked = this.numSentUnacked();
     if (numAcked === 0) return;
     if (numAcked > numUnacked) {
-      log(`Ignoring MLR ACK ${reqNum}; only ${numUnacked} packet(s) unacked.`);
-      return;
+      log(`MLR ACK ${reqNum} advances beyond ${numUnacked} unacked packet(s); accepting cumulative ACK.`);
     }
     for (let seq = this.lastRcvAck; seq !== reqNum; seq = this.nextSeq(seq)) {
       this.sentFragments[seq] = null;
