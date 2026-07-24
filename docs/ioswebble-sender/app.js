@@ -3,6 +3,8 @@ const PRG_TYPE = 255;
 const PRG_SUBTYPE = 17;
 const MAX_EXPECTED_PRG_SIZE = 10 * 1024 * 1024;
 const LARGE_PRG_WARNING_SIZE = 4 * 1024 * 1024;
+const SAFE_GFDI_PACKET_SIZE = 375;
+const MAX_EXPERIMENTAL_GFDI_PACKET_SIZE = 1500;
 const TRUSTED_DEVICE_KEY = "garminPrgSender.trustedDevice";
 const SAVED_PRG_DB_NAME = "garminPrgSender.savedPrgs";
 const SAVED_PRG_DB_VERSION = 1;
@@ -787,10 +789,13 @@ async function sendPrg() {
     await requestWakeLock("upload start");
     setProgress(0, 0, selectedFile.size);
     let uploadStats = null;
-    const maxPacketSize = readNumber(packetSizeInput, 375);
+    const maxPacketSize = readGfdiPacketSize();
     const fragmentSize = readNumber(fragmentSizeInput, 20);
     const writeDelayMs = readNumber(writeDelayInput, 0);
     log(`Upload settings: GFDI packet ${maxPacketSize}, BLE fragment ${fragmentSize}, write delay ${writeDelayMs} ms.`);
+    if (maxPacketSize > SAFE_GFDI_PACKET_SIZE) {
+      log(`Experimental GFDI packet size ${maxPacketSize}. If this stalls or fails, retry with ${SAFE_GFDI_PACKET_SIZE}.`);
+    }
     await uploadPrg(selectedFile.data, connection, {
       maxPacketSize,
       timeoutMs: 30000,
@@ -1040,7 +1045,7 @@ async function uploadPrg(data, transport, options) {
   validatePrg(data);
   const timeoutMs = options.timeoutMs ?? 30000;
   const maxRetries = options.maxRetries ?? 5;
-  const maxPacketSize = clampNumber(options.maxPacketSize, 64, 375, 375);
+  const maxPacketSize = clampNumber(options.maxPacketSize, 64, MAX_EXPERIMENTAL_GFDI_PACKET_SIZE, SAFE_GFDI_PACKET_SIZE);
 
   log("Sending SYNC_READY.");
   await sendSystemEvent(transport, buildSyncReady(), timeoutMs);
@@ -2039,6 +2044,12 @@ function setScanning(value) {
 function readNumber(input, fallback) {
   const value = Number(input.value);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function readGfdiPacketSize() {
+  const value = clampNumber(packetSizeInput.value, 64, MAX_EXPERIMENTAL_GFDI_PACKET_SIZE, SAFE_GFDI_PACKET_SIZE);
+  packetSizeInput.value = String(value);
+  return value;
 }
 
 function clampNumber(value, min, max, fallback) {
