@@ -7,6 +7,7 @@ const SAFE_GFDI_PACKET_SIZE = 375;
 const MAX_EXPERIMENTAL_GFDI_PACKET_SIZE = 8192;
 const LARGE_GFDI_PACKET_SIZE = 1500;
 const SAFE_BLE_FRAGMENT_SIZE = 20;
+const MAX_BLE_FRAGMENT_SIZE = 180;
 const MAX_PIPELINE_WINDOW = 16;
 const TRUSTED_DEVICE_KEY = "garminPrgSender.trustedDevice";
 const SAVED_PRG_DB_NAME = "garminPrgSender.savedPrgs";
@@ -1077,6 +1078,9 @@ async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt, sig
   if (settings.maxPacketSize > LARGE_GFDI_PACKET_SIZE) {
     log("Large GFDI packets are probing the watch/MLR breaking point. Stop + Retry is expected if the watch stops ACKing.");
   }
+  if (settings.fragmentSize > SAFE_BLE_FRAGMENT_SIZE) {
+    log(`Experimental BLE fragment ${settings.fragmentSize}. Your iPhone/WebBLE path previously stalled above ${SAFE_BLE_FRAGMENT_SIZE}; use Stop + Retry if writes hang.`);
+  }
   if (settings.pipelineWindow > 1) {
     log(`Experimental pipeline window ${settings.pipelineWindow}. If upload fails, retry with Pipeline chunks 1.`);
   }
@@ -1266,7 +1270,7 @@ class BaseTransport {
     this.receive = receive;
     this.send = send;
     this.kind = kind;
-    this.writeFragmentSize = clampNumber(options.writeFragmentSize, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
+    this.writeFragmentSize = clampNumber(options.writeFragmentSize, SAFE_BLE_FRAGMENT_SIZE, MAX_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
     this.writeDelayMs = clampNumber(options.writeDelayMs, 0, 25, 0);
     this.decoder = new CobsDecoder();
     this.messages = [];
@@ -2674,7 +2678,7 @@ function applyTuningSettings(settings) {
 
 function applyTransportSettings(transport, settings) {
   if (!transport) return;
-  transport.writeFragmentSize = clampNumber(settings.fragmentSize, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
+  transport.writeFragmentSize = clampNumber(settings.fragmentSize, SAFE_BLE_FRAGMENT_SIZE, MAX_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
   transport.writeDelayMs = clampNumber(settings.writeDelayMs, 0, 25, 0);
 }
 
@@ -2733,7 +2737,7 @@ function uniqueBenchmarkProfiles(profiles) {
   for (const profile of profiles) {
     const normalized = {
       maxPacketSize: clampNumber(profile.maxPacketSize, 64, MAX_EXPERIMENTAL_GFDI_PACKET_SIZE, SAFE_GFDI_PACKET_SIZE),
-      fragmentSize: clampNumber(profile.fragmentSize, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE),
+      fragmentSize: clampNumber(profile.fragmentSize, SAFE_BLE_FRAGMENT_SIZE, MAX_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE),
       pipelineWindow: clampNumber(profile.pipelineWindow, 1, MAX_PIPELINE_WINDOW, 1),
       writeDelayMs: clampNumber(profile.writeDelayMs, 0, 25, 0),
       label: profile.label || `${profile.maxPacketSize}/${profile.fragmentSize}/${profile.pipelineWindow}/${profile.writeDelayMs}`
@@ -2798,7 +2802,7 @@ function isValidTuningResult(value) {
     && value.maxPacketSize >= 64
     && value.maxPacketSize <= MAX_EXPERIMENTAL_GFDI_PACKET_SIZE
     && value.fragmentSize >= SAFE_BLE_FRAGMENT_SIZE
-    && value.fragmentSize <= SAFE_BLE_FRAGMENT_SIZE
+    && value.fragmentSize <= MAX_BLE_FRAGMENT_SIZE
     && value.pipelineWindow >= 1
     && value.pipelineWindow <= MAX_PIPELINE_WINDOW
     && value.writeDelayMs >= 0
@@ -2974,7 +2978,7 @@ function readGfdiPacketSize() {
 }
 
 function readBleFragmentSize() {
-  const value = clampNumber(fragmentSizeInput.value, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
+  const value = clampNumber(fragmentSizeInput.value, SAFE_BLE_FRAGMENT_SIZE, MAX_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
   fragmentSizeInput.value = String(value);
   return value;
 }
