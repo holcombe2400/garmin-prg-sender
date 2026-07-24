@@ -3,17 +3,17 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Garmin PRG WebBLE Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260724-mlr-ack-advance">
+    <title>Garmin PRG Bluetooth Sender</title>
+    <link rel="stylesheet" href="./styles.css?v=20260724-bluefy-mlr-serialized">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260724-mlr-ack-advance"></script>
+    <script type="module" src="./app.js?v=20260724-bluefy-mlr-serialized"></script>
   </head>
   <body>
     <main class="app">
       <header class="topbar">
         <div>
           <h1>Garmin PRG Sender</h1>
-          <p class="muted">WebBLE direct staging</p>
+          <p class="muted">Bluefy / Web Bluetooth direct staging</p>
         </div>
         <span id="bleState" class="badge">checking</span>
       </header>
@@ -49,9 +49,9 @@
         <label class="label" for="apiModeInput">Bluetooth API</label>
         <select id="apiModeInput">
           <option value="bluetooth-only" selected>Standard only</option>
-          <option value="webble-first">iOSWebBLE first</option>
+          <option value="webble-first">Extension first</option>
           <option value="bluetooth-first">Standard first</option>
-          <option value="webble-only">iOSWebBLE only</option>
+          <option value="webble-only">Extension only</option>
         </select>
         <label class="label" for="pickerModeInput">Picker mode</label>
         <select id="pickerModeInput">

@@ -51,6 +51,7 @@ const MLR_ACK_TRIGGER_THRESHOLD = 5;
 const MLR_INITIAL_RETRANSMISSION_TIMEOUT_MS = 1000;
 const MLR_MAX_RETRANSMISSION_TIMEOUT_MS = 20000;
 const MLR_SEND_WINDOW_TIMEOUT_MS = 8000;
+const MLR_ACK_DRAIN_TIMEOUT_MS = 10000;
 const MLR_MAX_RETRANSMISSION_EVENTS = 5;
 const MLR_LARGE_FRAGMENT_MAX_RETRANSMISSION_EVENTS = 2;
 
@@ -307,16 +308,16 @@ function applyRuntimeDefaults() {
 async function refreshBleAvailability() {
   const bluetooth = getBluetooth();
   if (!bluetooth) {
-    setBleState("no webble", false);
-    setStatus(`iOSWebBLE/Web Bluetooth is not available in this browser. ${bluetoothApiStatusText()}`);
+    setBleState("no bluetooth", false);
+    setStatus(`Bluefy/Web Bluetooth is not available in this browser. ${bluetoothApiStatusText()}`);
     return;
   }
   if (typeof bluetooth.getAvailability === "function") {
     const available = await bluetooth.getAvailability();
-    setBleState(available ? "webble ready" : "bluetooth off", available);
+    setBleState(available ? "bluetooth ready" : "bluetooth off", available);
     return;
   }
-  setBleState("webble ready", true);
+  setBleState("bluetooth ready", true);
 }
 
 async function onFileSelected() {
@@ -587,7 +588,7 @@ async function chooseWatch() {
     updateBridgeDiagnostics();
     log(`Bluetooth API mode: ${apiModeInput.value}. ${bluetoothApiStatusText()}`);
     logBridgeDiagnostics("Pre-picker bridge diagnostics");
-    log(`Opening WebBLE device chooser (${pickerMode} mode).`);
+    log(`Opening Bluetooth device chooser (${pickerMode} mode).`);
     selectedDevice = await requestBluetoothDeviceWithFallback(pickerMode);
     connection = null;
     setTargetConfirmed(false);
@@ -610,7 +611,7 @@ async function chooseWatch() {
     }
   } catch (error) {
     if (isOriginPickerRejection(error)) {
-      log("iOSWebBLE rejected the chosen device as not offered to this page origin.");
+      log("Bluefy/Web Bluetooth rejected the chosen device as not offered to this page origin.");
       logBridgeDiagnostics("Origin rejection bridge diagnostics");
     }
     showError("Watch selection failed", error);
@@ -621,7 +622,7 @@ async function chooseWatch() {
 
 async function requestBluetoothDeviceWithFallback(pickerMode) {
   const candidates = getBluetoothCandidates();
-  if (!candidates.length) throw new Error("iOSWebBLE/Web Bluetooth is not available.");
+  if (!candidates.length) throw new Error("Bluefy/Web Bluetooth is not available.");
 
   const candidate = candidates[0];
   const variant = buildRequestVariant(pickerMode);
@@ -637,8 +638,8 @@ async function requestBluetoothDeviceWithFallback(pickerMode) {
         updateBridgeDiagnostics();
         await refreshBleAvailability();
         updateButtons();
-        log("Switched Bluetooth API to iOSWebBLE only. Tap Choose Watch again.");
-        throw new Error("WebBLE is now active. Tap Choose Watch again; this first tap only woke the bridge.");
+        log("Switched Bluetooth API to extension only. Tap Choose Watch again.");
+        throw new Error("Bluetooth extension API is now active. Tap Choose Watch again; this first tap only woke the bridge.");
       }
       updateBridgeDiagnostics();
       const nextMode = nextPickerMode(pickerMode);
@@ -743,7 +744,7 @@ async function runDiagnosticScan() {
   log(`Bluetooth API mode: ${apiModeInput.value}. ${bluetoothApiStatusText()}`);
   logBridgeDiagnostics("Pre-scan bridge diagnostics");
   if (typeof bluetooth.requestLEScan !== "function") {
-    setStatus("Diagnostic scanning is not available in this WebBLE runtime.");
+    setStatus("Diagnostic scanning is not available in this Bluetooth browser runtime.");
     log("navigator.bluetooth.requestLEScan is not available.");
     return;
   }
@@ -782,7 +783,7 @@ async function runDiagnosticScan() {
   } catch (error) {
     stopDiagnosticScan("Scan failed.", false);
     if (isHandleMessageError(error)) {
-      log("This iOSWebBLE runtime appears to expose requestLEScan incompletely; use Choose Watch instead of Scan 20s.");
+      log("This Bluetooth browser runtime appears to expose requestLEScan incompletely; use Choose Watch instead of Scan 20s.");
     }
     showError("Diagnostic scan failed", error);
   }
@@ -1088,7 +1089,7 @@ async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt, sig
     log("Large GFDI packets are probing the watch/MLR breaking point. Stop + Retry is expected if the watch stops ACKing.");
   }
   if (settings.fragmentSize > SAFE_BLE_FRAGMENT_SIZE) {
-    log(`Experimental BLE fragment ${settings.fragmentSize}. Your iPhone/WebBLE path previously stalled above ${SAFE_BLE_FRAGMENT_SIZE}; use Stop + Retry if writes hang.`);
+    log(`Experimental BLE fragment ${settings.fragmentSize}. Your Bluefy/iPhone path previously stalled above ${SAFE_BLE_FRAGMENT_SIZE}; use Stop + Retry if writes hang.`);
   }
   if (settings.pipelineWindow > 1) {
     log(`Experimental pipeline window ${settings.pipelineWindow}. If upload fails, retry with Pipeline chunks 1.`);
@@ -1284,6 +1285,7 @@ class BaseTransport {
     this.decoder = new CobsDecoder();
     this.messages = [];
     this.waiters = [];
+    this.writeChain = Promise.resolve();
   }
 
   async initialize() {
@@ -1348,6 +1350,14 @@ class BaseTransport {
   }
 
   async writeRaw(bytes) {
+    const task = this.writeChain
+      .catch(() => {})
+      .then(() => this.writeRawNow(bytes));
+    this.writeChain = task.catch(() => {});
+    return task;
+  }
+
+  async writeRawNow(bytes) {
     if (typeof this.send.writeValueWithoutResponse === "function") {
       await this.send.writeValueWithoutResponse(bytes);
     } else if (typeof this.send.writeValueWithResponse === "function") {
@@ -1491,6 +1501,7 @@ class MlrSession {
     this.retransmissionTimer = null;
     this.failure = null;
     this.closed = false;
+    this.lastLoggedShape = null;
     if (this.usesLargeBleFragment()) {
       log(`MLR large-fragment mode: BLE fragment ${this.transport.writeFragmentSize}, internal MLR window ${this.maxNumUnackedSend}.`);
     }
@@ -1499,6 +1510,8 @@ class MlrSession {
   async sendMessage(message, signal = null) {
     if (!message?.length) return;
     const fragmentSize = Math.max(1, this.maxPacketSize() - 2);
+    const fragmentCount = Math.ceil(message.length / fragmentSize);
+    this.logSendShape(message.length, fragmentSize, fragmentCount);
     for (let offset = 0; offset < message.length; offset += fragmentSize) {
       throwIfAborted(signal);
       if (this.failure) throw this.failure;
@@ -1512,6 +1525,7 @@ class MlrSession {
       await this.transport.writeRaw(packet);
       if (this.numSentUnacked() === 1) this.startRetransmissionTimer();
     }
+    await this.waitForAckDrain(signal);
   }
 
   onPacketReceived(packet) {
@@ -1562,6 +1576,21 @@ class MlrSession {
         new Promise((resolve) => this.windowWaiters.push(resolve)),
         MLR_SEND_WINDOW_TIMEOUT_MS,
         "Timed out waiting for MLR send window",
+        signal
+      );
+      if (this.failure) throw this.failure;
+    }
+    if (this.failure) throw this.failure;
+    if (this.closed) throw new Error("MLR transport is closed.");
+  }
+
+  async waitForAckDrain(signal) {
+    if (this.failure) throw this.failure;
+    while (!this.closed && this.lastRcvAck !== this.nextSendSeq) {
+      await withTimeout(
+        new Promise((resolve) => this.windowWaiters.push(resolve)),
+        MLR_ACK_DRAIN_TIMEOUT_MS,
+        "Timed out waiting for MLR ACK drain",
         signal
       );
       if (this.failure) throw this.failure;
@@ -1646,6 +1675,14 @@ class MlrSession {
 
   usesLargeBleFragment() {
     return (this.transport.writeFragmentSize || SAFE_BLE_FRAGMENT_SIZE) > SAFE_BLE_FRAGMENT_SIZE;
+  }
+
+  logSendShape(messageLength, fragmentSize, fragmentCount) {
+    if (messageLength < LARGE_GFDI_PACKET_SIZE && !this.usesLargeBleFragment()) return;
+    const key = `${this.transport.writeFragmentSize}/${fragmentSize}/${fragmentCount}`;
+    if (key === this.lastLoggedShape) return;
+    this.lastLoggedShape = key;
+    log(`MLR send shape: ${messageLength} encoded bytes -> ${fragmentCount} fragment(s), BLE write ${this.transport.writeFragmentSize}, MLR payload ${fragmentSize}.`);
   }
 
   numSentUnacked() {
@@ -2486,7 +2523,7 @@ function isLikelyGarminAdvertisement(name, uuids) {
 
 function requireBluetooth() {
   const bluetooth = getBluetooth();
-  if (!bluetooth) throw new Error("iOSWebBLE/Web Bluetooth is not available.");
+  if (!bluetooth) throw new Error("Bluefy/Web Bluetooth is not available.");
   return bluetooth;
 }
 
