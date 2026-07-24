@@ -133,6 +133,10 @@ button.secondary {
   gap: 10px;
 }
 
+.send-actions {
+  margin-top: 14px;
+}
+
 .identity {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

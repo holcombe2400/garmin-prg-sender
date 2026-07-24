@@ -12,6 +12,15 @@ const SAVED_PRG_STORE = "files";
 const MAX_SAVED_PRGS = 12;
 const GITHUB_REPO_KEY = "garminPrgSender.githubRepo";
 const DEFAULT_GITHUB_REPO = "holcombe2400/garmin-vpet";
+const TUNING_HISTORY_KEY = "garminPrgSender.tuningHistory";
+const MAX_TUNING_HISTORY = 20;
+const FAST_FENIX6_TUNING = Object.freeze({
+  maxPacketSize: 400,
+  fragmentSize: 180,
+  pipelineWindow: 2,
+  writeDelayMs: 0,
+  label: "fenix 6 fast preset"
+});
 
 const GADGETBRIDGE_CLIENT_ID = 2;
 const REQUEST_REGISTER_ML = 0;
@@ -100,6 +109,7 @@ const confirmTargetInput = document.querySelector("#confirmTargetInput");
 const trustedWatchText = document.querySelector("#trustedWatchText");
 const rememberWatchButton = document.querySelector("#rememberWatchButton");
 const clearWatchButton = document.querySelector("#clearWatchButton");
+const autoTuneButton = document.querySelector("#autoTuneButton");
 const progressBar = document.querySelector("#progressBar");
 const progressText = document.querySelector("#progressText");
 const statusText = document.querySelector("#statusText");
@@ -186,6 +196,7 @@ async function init() {
   stopScanButton.addEventListener("click", () => stopDiagnosticScan("Scan stopped."));
   rememberWatchButton.addEventListener("click", rememberSelectedWatch);
   clearWatchButton.addEventListener("click", clearTrustedWatch);
+  autoTuneButton?.addEventListener("click", autoTuneSettings);
   confirmTargetInput.addEventListener("change", () => {
     targetConfirmed = confirmTargetInput.checked;
     if (targetConfirmed && selectedDevice) {
@@ -812,9 +823,20 @@ async function sendPrg() {
       }
     });
     setProgress(100, selectedFile.size, selectedFile.size, uploadStats);
-    const transferSummary = uploadStats ? completedTransferSummary(uploadStats, selectedFile.size) : "";
+    const transferMetrics = uploadStats ? completedTransferMetrics(uploadStats, selectedFile.size) : null;
+    const transferSummary = transferMetrics ? transferSummaryText(transferMetrics) : "";
     setStatus(transferSummary ? `Upload complete. ${transferSummary} Let Garmin Connect reconnect to register the app.` : "Upload complete. Let Garmin Connect reconnect to register the app.");
     if (transferSummary) log(transferSummary);
+    if (transferMetrics) recordTuningResult({
+      maxPacketSize,
+      fragmentSize,
+      pipelineWindow,
+      writeDelayMs,
+      avgBps: transferMetrics.avgBps,
+      elapsedSec: transferMetrics.elapsedSec,
+      fileSize: selectedFile.size,
+      transportKind: connection.kind
+    });
     log("Upload complete. Garmin Connect must perform the registration pass.");
   } catch (error) {
     showError("Upload failed", error);
@@ -1818,10 +1840,14 @@ function updateTransferStats(stats, offset) {
   return { avgBps, recentBps, etaSec, elapsedSec };
 }
 
-function completedTransferSummary(stats, total) {
+function completedTransferMetrics(stats, total) {
   const elapsedSec = Math.max((performance.now() - stats.startedAt) / 1000, 0);
   const avgBps = elapsedSec > 0 ? total / elapsedSec : 0;
-  return `Transfer rate: ${formatRate(avgBps)} average over ${formatDuration(elapsedSec)}.`;
+  return { avgBps, elapsedSec };
+}
+
+function transferSummaryText(metrics) {
+  return `Transfer rate: ${formatRate(metrics.avgBps)} average over ${formatDuration(metrics.elapsedSec)}.`;
 }
 
 function updateWatchIdentity(transportTextValue) {
@@ -1935,6 +1961,88 @@ function saveGithubRepoSetting(repo) {
 function selectedGithubPrgAsset() {
   const selectedId = githubPrgInput?.value;
   return selectedId ? githubPrgAssets.find((asset) => asset.id === selectedId) || null : null;
+}
+
+function autoTuneSettings() {
+  const best = bestTuningResult();
+  if (best) {
+    applyTuningSettings(best);
+    const message = `Auto Tune applied best recorded settings: GFDI ${best.maxPacketSize}, BLE ${best.fragmentSize}, pipeline ${best.pipelineWindow}, delay ${best.writeDelayMs} ms (${formatRate(best.avgBps)}).`;
+    setStatus(message);
+    log(message);
+    return;
+  }
+  applyTuningSettings(FAST_FENIX6_TUNING);
+  const message = `Auto Tune applied ${FAST_FENIX6_TUNING.label}: GFDI ${FAST_FENIX6_TUNING.maxPacketSize}, BLE ${FAST_FENIX6_TUNING.fragmentSize}, pipeline ${FAST_FENIX6_TUNING.pipelineWindow}, delay ${FAST_FENIX6_TUNING.writeDelayMs} ms.`;
+  setStatus(message);
+  log(`${message} Successful uploads will update the best setting automatically.`);
+}
+
+function applyTuningSettings(settings) {
+  packetSizeInput.value = String(settings.maxPacketSize);
+  fragmentSizeInput.value = String(settings.fragmentSize);
+  pipelineWindowInput.value = String(settings.pipelineWindow);
+  writeDelayInput.value = String(settings.writeDelayMs);
+}
+
+function recordTuningResult(result) {
+  try {
+    const history = readTuningHistory();
+    history.push({
+      maxPacketSize: result.maxPacketSize,
+      fragmentSize: result.fragmentSize,
+      pipelineWindow: result.pipelineWindow,
+      writeDelayMs: result.writeDelayMs,
+      avgBps: result.avgBps,
+      elapsedSec: result.elapsedSec,
+      fileSize: result.fileSize,
+      transportKind: result.transportKind,
+      savedAt: new Date().toISOString()
+    });
+    const cleaned = history
+      .filter(isValidTuningResult)
+      .sort((left, right) => (right.avgBps || 0) - (left.avgBps || 0))
+      .slice(0, MAX_TUNING_HISTORY);
+    localStorage.setItem(TUNING_HISTORY_KEY, JSON.stringify(cleaned));
+    log(`Saved tuning result: GFDI ${result.maxPacketSize}, BLE ${result.fragmentSize}, pipeline ${result.pipelineWindow}, delay ${result.writeDelayMs} ms, ${formatRate(result.avgBps)}.`);
+  } catch (error) {
+    log(`Could not save tuning result: ${messageOf(error)}`);
+  }
+}
+
+function bestTuningResult() {
+  return readTuningHistory()
+    .filter(isValidTuningResult)
+    .sort((left, right) => (right.avgBps || 0) - (left.avgBps || 0))[0] || null;
+}
+
+function readTuningHistory() {
+  try {
+    const raw = localStorage.getItem(TUNING_HISTORY_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    log(`Could not read tuning history: ${messageOf(error)}`);
+    return [];
+  }
+}
+
+function isValidTuningResult(value) {
+  return value
+    && Number.isFinite(value.maxPacketSize)
+    && Number.isFinite(value.fragmentSize)
+    && Number.isFinite(value.pipelineWindow)
+    && Number.isFinite(value.writeDelayMs)
+    && Number.isFinite(value.avgBps)
+    && value.maxPacketSize >= 64
+    && value.maxPacketSize <= MAX_EXPERIMENTAL_GFDI_PACKET_SIZE
+    && value.fragmentSize >= 20
+    && value.fragmentSize <= 180
+    && value.pipelineWindow >= 1
+    && value.pipelineWindow <= 8
+    && value.writeDelayMs >= 0
+    && value.writeDelayMs <= 25
+    && value.avgBps > 0;
 }
 
 function normalizeGitHubRepo(value) {
@@ -2069,6 +2177,7 @@ function updateButtons() {
   clearWatchButton.disabled = isBusy || isScanning || !trustedDevice;
   confirmTargetInput.disabled = isBusy || isScanning || !connection || hasTrustedMismatch();
   sendButton.disabled = isBusy || isScanning || !selectedFile || !connection || !targetConfirmed || hasTrustedMismatch();
+  if (autoTuneButton) autoTuneButton.disabled = isBusy || isScanning;
 }
 
 function setBusy(value) {
