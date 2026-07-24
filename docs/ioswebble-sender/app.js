@@ -117,6 +117,7 @@ const clearWatchButton = document.querySelector("#clearWatchButton");
 const autoTuneButton = document.querySelector("#autoTuneButton");
 const benchmarkSendButton = document.querySelector("#benchmarkSendButton");
 const retryButton = document.querySelector("#retryButton");
+const stopUploadButton = document.querySelector("#stopUploadButton");
 const riskyPipelineInput = document.querySelector("#riskyPipelineInput");
 const progressBar = document.querySelector("#progressBar");
 const progressText = document.querySelector("#progressText");
@@ -156,6 +157,7 @@ let isUploading = false;
 let wakeLock = null;
 let lastUploadRequest = null;
 let retryAvailable = false;
+let uploadAbortController = null;
 
 init().catch((error) => showError("Startup failed", error));
 
@@ -209,6 +211,7 @@ async function init() {
   autoTuneButton?.addEventListener("click", autoTuneSettings);
   benchmarkSendButton?.addEventListener("click", () => sendPrg({ benchmark: true }));
   retryButton?.addEventListener("click", retryLastUpload);
+  stopUploadButton?.addEventListener("click", () => stopActiveUpload("Upload stopped by user."));
   confirmTargetInput.addEventListener("change", () => {
     targetConfirmed = confirmTargetInput.checked;
     if (targetConfirmed && selectedDevice) {
@@ -806,11 +809,14 @@ async function connectWatch() {
 
 async function sendPrg({ benchmark = false, retry = false } = {}) {
   if (!selectedFile || !connection || !targetConfirmed || hasTrustedMismatch()) return;
+  if (isUploading) return;
   const failedBenchmarkProfiles = retry && lastUploadRequest?.benchmark === benchmark
     ? new Set(lastUploadRequest.failedBenchmarkProfiles || [])
     : new Set();
   rememberUploadRequest(benchmark, failedBenchmarkProfiles);
   setRetryAvailable(false);
+  uploadAbortController = new AbortController();
+  const signal = uploadAbortController.signal;
   try {
     isUploading = true;
     setBusy(true);
@@ -819,7 +825,7 @@ async function sendPrg({ benchmark = false, retry = false } = {}) {
     const maxAttempts = benchmark ? MAX_BENCHMARK_RESTARTS + 1 : 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        await sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt });
+        await sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt, signal });
         clearRetryState();
         return;
       } catch (error) {
@@ -831,21 +837,28 @@ async function sendPrg({ benchmark = false, retry = false } = {}) {
         const profile = error.benchmarkProfile;
         log(`Benchmark profile failed and will be skipped: ${profile.label}. ${messageOf(error.cause || error)}`);
         setStatus(`Benchmark profile failed: ${profile.label}. Reconnecting and trying the next setting...`);
+        throwIfAborted(signal);
         await reconnectForBenchmarkRetry(currentUploadSettings());
       }
     }
   } catch (error) {
     setRetryAvailable(true);
-    showError("Upload failed", error);
+    if (isAbortError(error) || signal.aborted) {
+      setStatus("Upload stopped. Retry is available.");
+      log("Upload stopped before completion. Retry will reconnect and restart from zero.");
+    } else {
+      showError("Upload failed", error);
+    }
   } finally {
     isUploading = false;
+    uploadAbortController = null;
     releaseWakeLock();
     foregroundWarning.textContent = "Keep Bluefy open in the foreground until upload reaches 100%.";
     setBusy(false);
   }
 }
 
-async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt }) {
+async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt, signal }) {
   setProgress(0, 0, selectedFile.size);
   let uploadStats = null;
   const baseSettings = currentUploadSettings();
@@ -875,12 +888,14 @@ async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt }) {
       benchmarkProfiles: null,
       timeoutMs: 30000,
       maxRetries: 5,
+      signal,
       onProgress: ({ offset, total }) => {
         if (!uploadStats) uploadStats = createTransferStats(total);
         setProgress(Math.floor((100 * offset) / total), offset, total, uploadStats);
       }
     });
   } catch (error) {
+    if (isAbortError(error) || signal?.aborted) throw error;
     if (benchmark) throw benchmarkProfileFailure(settings, error);
     throw error;
   }
@@ -905,6 +920,14 @@ async function reconnectForBenchmarkRetry(settings) {
 
 async function retryLastUpload() {
   if (!lastUploadRequest || !selectedFile || !selectedDevice || hasTrustedMismatch()) return;
+  if (isUploading) {
+    await stopActiveUpload("Stop + Retry requested. Restarting from zero.");
+    await waitForUploadIdle(3000);
+    if (isUploading) {
+      setStatus("Stop sent. Waiting for Bluefy to release Bluetooth; tap Retry again in a moment.");
+      return;
+    }
+  }
   const benchmark = Boolean(lastUploadRequest.benchmark);
   const settings = currentUploadSettings();
   try {
@@ -920,6 +943,30 @@ async function retryLastUpload() {
     setBusy(false);
   }
   await sendPrg({ benchmark, retry: true });
+}
+
+async function stopActiveUpload(message) {
+  if (!isUploading) return;
+  setRetryAvailable(true);
+  setStatus(message || "Stopping upload...");
+  log(`${message || "Stopping upload."} Disconnecting watch to break the active transfer.`);
+  uploadAbortController?.abort?.();
+  try {
+    selectedDevice?.gatt?.disconnect?.();
+  } catch (error) {
+    log(`Disconnect during stop failed: ${messageOf(error)}`);
+  }
+  connection = null;
+  setTargetConfirmed(false);
+  releaseWakeLock();
+  updateButtons();
+}
+
+async function waitForUploadIdle(timeoutMs) {
+  const startedAt = performance.now();
+  while (isUploading && performance.now() - startedAt < timeoutMs) {
+    await sleep(100);
+  }
 }
 
 async function reconnectForRetry(settings, reason) {
@@ -1032,20 +1079,36 @@ class BaseTransport {
     });
   }
 
-  receiveGfdi(timeoutMs) {
+  receiveGfdi(timeoutMs, signal) {
+    throwIfAborted(signal);
     const ready = this.messages.shift();
     if (ready) return Promise.resolve(ready);
     return new Promise((resolve, reject) => {
-      const waiter = (message) => {
-        clearTimeout(timeout);
-        resolve(message);
-      };
-      const timeout = setTimeout(() => {
+      let timeout = null;
+      let abortHandler = null;
+      const cleanup = () => {
+        if (timeout !== null) clearTimeout(timeout);
+        if (abortHandler) signal?.removeEventListener?.("abort", abortHandler);
         const index = this.waiters.indexOf(waiter);
         if (index >= 0) this.waiters.splice(index, 1);
+      };
+      const waiter = (message) => {
+        cleanup();
+        resolve(message);
+      };
+      timeout = setTimeout(() => {
+        cleanup();
         reject(new Error(`Timed out waiting for GFDI response after ${timeoutMs}ms`));
       }, timeoutMs);
       this.waiters.push(waiter);
+      if (signal) {
+        abortHandler = () => {
+          cleanup();
+          reject(abortError());
+        };
+        signal.addEventListener("abort", abortHandler, { once: true });
+        if (signal.aborted) abortHandler();
+      }
     });
   }
 
@@ -1171,13 +1234,16 @@ async function uploadPrg(data, transport, options) {
   const maxPacketSize = clampNumber(options.maxPacketSize, 64, MAX_EXPERIMENTAL_GFDI_PACKET_SIZE, SAFE_GFDI_PACKET_SIZE);
   const pipelineWindow = clampNumber(options.pipelineWindow, 1, 8, 1);
   const benchmarkProfiles = Array.isArray(options.benchmarkProfiles) ? options.benchmarkProfiles : [];
+  const signal = options.signal;
 
   log("Sending SYNC_READY.");
-  await sendSystemEvent(transport, buildSyncReady(), timeoutMs);
+  throwIfAborted(signal);
+  await sendSystemEvent(transport, buildSyncReady(), timeoutMs, signal);
 
   log(`Creating PRG file slot (${data.length} bytes).`);
-  await sendGfdiChecked(transport, buildCreateFile(data.length), "CREATE_FILE");
-  const createStatus = await receiveKind(transport, "createFile", timeoutMs);
+  throwIfAborted(signal);
+  await sendGfdiChecked(transport, buildCreateFile(data.length), "CREATE_FILE", signal);
+  const createStatus = await receiveKind(transport, "createFile", timeoutMs, signal);
   if (createStatus.status !== Status.ACK || createStatus.createStatus !== CreateStatus.OK) {
     throw new Error(describeCreateFileFailure(createStatus, data.length));
   }
@@ -1187,8 +1253,9 @@ async function uploadPrg(data, transport, options) {
   options.onProgress?.({ offset: 0, total: data.length });
 
   log(`Starting upload to file index ${createStatus.fileIndex}.`);
-  await sendGfdiChecked(transport, buildUploadRequest(createStatus.fileIndex, data.length), "UPLOAD_REQUEST");
-  const uploadStatus = await receiveKind(transport, "uploadRequest", timeoutMs);
+  throwIfAborted(signal);
+  await sendGfdiChecked(transport, buildUploadRequest(createStatus.fileIndex, data.length), "UPLOAD_REQUEST", signal);
+  const uploadStatus = await receiveKind(transport, "uploadRequest", timeoutMs, signal);
   if (uploadStatus.status !== Status.ACK || uploadStatus.uploadStatus !== UploadStatus.OK) {
     throw new Error(`Upload request failed: ${JSON.stringify(uploadStatus)}`);
   }
@@ -1217,7 +1284,8 @@ async function uploadPrg(data, transport, options) {
   }
 
   log("Sending SYNC_COMPLETE.");
-  await sendSystemEvent(transport, buildSyncComplete(), timeoutMs);
+  throwIfAborted(signal);
+  await sendSystemEvent(transport, buildSyncComplete(), timeoutMs, signal);
   await sleep(2000);
 }
 
@@ -1239,7 +1307,8 @@ async function uploadBenchmarkProfiles(data, transport, chunker, timeoutMs, maxR
           ? uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRetries, options, stopOffset)
           : uploadPipelinedChunks(data, transport, chunker, timeoutMs, profile.pipelineWindow, options, stopOffset),
         BENCHMARK_PROFILE_TIMEOUT_MS,
-        `Benchmark profile timed out after ${Math.round(BENCHMARK_PROFILE_TIMEOUT_MS / 1000)}s`
+        `Benchmark profile timed out after ${Math.round(BENCHMARK_PROFILE_TIMEOUT_MS / 1000)}s`,
+        options.signal
       );
     } catch (error) {
       throw benchmarkProfileFailure(profile, error);
@@ -1280,11 +1349,12 @@ function benchmarkBytesForProfile(profile, remainingBytes) {
 async function uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRetries, options, stopOffset = data.length) {
   let retries = 0;
   while (true) {
+    throwIfAborted(options.signal);
     const chunk = chunker.nextChunk(stopOffset);
     if (!chunk) break;
 
-    await sendGfdiChecked(transport, buildFileTransferData(chunk.data, chunk.offset, chunk.runningCrc), "FILE_TRANSFER_DATA");
-    const transferStatus = await receiveKind(transport, "fileTransferData", timeoutMs);
+    await sendGfdiChecked(transport, buildFileTransferData(chunk.data, chunk.offset, chunk.runningCrc), "FILE_TRANSFER_DATA", options.signal);
+    const transferStatus = await receiveKind(transport, "fileTransferData", timeoutMs, options.signal);
     if (transferStatus.status !== Status.ACK || transferStatus.transferStatus !== TransferStatus.OK) {
       if (canRetryTransfer(transferStatus, data.length, retries, maxRetries)) {
         retries += 1;
@@ -1313,17 +1383,20 @@ async function uploadSequentialChunks(data, transport, chunker, timeoutMs, maxRe
 
 async function uploadPipelinedChunks(data, transport, chunker, timeoutMs, pipelineWindow, options, stopOffset = data.length) {
   while (true) {
+    throwIfAborted(options.signal);
     const batch = [];
     for (let index = 0; index < pipelineWindow; index += 1) {
+      throwIfAborted(options.signal);
       const chunk = chunker.nextChunk(stopOffset);
       if (!chunk) break;
-      await sendGfdiChecked(transport, buildFileTransferData(chunk.data, chunk.offset, chunk.runningCrc), "FILE_TRANSFER_DATA");
+      await sendGfdiChecked(transport, buildFileTransferData(chunk.data, chunk.offset, chunk.runningCrc), "FILE_TRANSFER_DATA", options.signal);
       batch.push(chunk);
     }
     if (!batch.length) break;
 
     for (const chunk of batch) {
-      const transferStatus = await receiveKind(transport, "fileTransferData", timeoutMs);
+      throwIfAborted(options.signal);
+      const transferStatus = await receiveKind(transport, "fileTransferData", timeoutMs, options.signal);
       const expectedOffset = chunk.offset + chunk.data.length;
       if (transferStatus.status !== Status.ACK || transferStatus.transferStatus !== TransferStatus.OK) {
         throw new Error(`Pipelined file chunk failed at offset ${chunk.offset}; retry with Pipeline chunks 1. Status: ${JSON.stringify(transferStatus)}`);
@@ -1336,32 +1409,36 @@ async function uploadPipelinedChunks(data, transport, chunker, timeoutMs, pipeli
   }
 }
 
-async function sendSystemEvent(transport, packet, timeoutMs) {
-  await sendGfdiChecked(transport, packet, "SYSTEM_EVENT");
-  const status = await receiveGenericStatus(transport, GarminMessage.SYSTEM_EVENT, timeoutMs);
+async function sendSystemEvent(transport, packet, timeoutMs, signal) {
+  await sendGfdiChecked(transport, packet, "SYSTEM_EVENT", signal);
+  const status = await receiveGenericStatus(transport, GarminMessage.SYSTEM_EVENT, timeoutMs, signal);
   if (status.status !== Status.ACK) {
     throw new Error(`System event failed: ${JSON.stringify(status)}`);
   }
 }
 
-async function sendGfdiChecked(transport, packet, label) {
+async function sendGfdiChecked(transport, packet, label, signal) {
+  throwIfAborted(signal);
   await withTimeout(
     transport.sendGfdi(packet),
     GFDI_WRITE_TIMEOUT_MS,
-    `${label} write timed out after ${Math.round(GFDI_WRITE_TIMEOUT_MS / 1000)}s`
+    `${label} write timed out after ${Math.round(GFDI_WRITE_TIMEOUT_MS / 1000)}s`,
+    signal
   );
 }
 
-async function receiveGenericStatus(transport, originalMessageType, timeoutMs) {
+async function receiveGenericStatus(transport, originalMessageType, timeoutMs, signal) {
   while (true) {
-    const message = parseGfdi(await transport.receiveGfdi(timeoutMs));
+    throwIfAborted(signal);
+    const message = parseGfdi(await transport.receiveGfdi(timeoutMs, signal));
     if (message.kind === "generic" && message.originalMessageType === originalMessageType) return message;
   }
 }
 
-async function receiveKind(transport, kind, timeoutMs) {
+async function receiveKind(transport, kind, timeoutMs, signal) {
   while (true) {
-    const message = parseGfdi(await transport.receiveGfdi(timeoutMs));
+    throwIfAborted(signal);
+    const message = parseGfdi(await transport.receiveGfdi(timeoutMs, signal));
     if (message.kind === kind) return message;
   }
 }
@@ -2160,7 +2237,6 @@ function rememberUploadRequest(benchmark, failedBenchmarkProfiles = new Set()) {
 
 function setRetryAvailable(value) {
   retryAvailable = Boolean(value && lastUploadRequest);
-  if (retryButton) retryButton.textContent = lastUploadRequest?.benchmark ? "Retry Benchmark" : "Retry Send";
   updateButtons();
 }
 
@@ -2434,7 +2510,14 @@ function updateButtons() {
   confirmTargetInput.disabled = isBusy || isScanning || !connection || hasTrustedMismatch();
   sendButton.disabled = isBusy || isScanning || !selectedFile || !connection || !targetConfirmed || hasTrustedMismatch();
   if (benchmarkSendButton) benchmarkSendButton.disabled = sendButton.disabled;
-  if (retryButton) retryButton.disabled = isBusy || isScanning || !retryAvailable || !selectedFile || !selectedDevice || hasTrustedMismatch();
+  if (retryButton) {
+    const canRetry = isUploading || retryAvailable;
+    retryButton.disabled = isScanning || !canRetry || !lastUploadRequest || !selectedFile || !selectedDevice || hasTrustedMismatch() || (isBusy && !isUploading);
+    retryButton.textContent = isUploading
+      ? "Stop + Retry"
+      : (lastUploadRequest ? (lastUploadRequest.benchmark ? "Retry Benchmark" : "Retry Send") : "Retry");
+  }
+  if (stopUploadButton) stopUploadButton.disabled = !isUploading;
   if (autoTuneButton) autoTuneButton.disabled = isBusy || isScanning;
 }
 
@@ -2584,14 +2667,38 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function withTimeout(promise, timeoutMs, message) {
+function withTimeout(promise, timeoutMs, message, signal) {
+  throwIfAborted(signal);
   let timeoutId = null;
+  let abortHandler = null;
   const timeout = new Promise((_, reject) => {
     timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
   });
-  return Promise.race([promise, timeout]).finally(() => {
+  const candidates = [promise, timeout];
+  if (signal) {
+    candidates.push(new Promise((_, reject) => {
+      abortHandler = () => reject(abortError());
+      signal.addEventListener("abort", abortHandler, { once: true });
+    }));
+  }
+  return Promise.race(candidates).finally(() => {
     if (timeoutId !== null) clearTimeout(timeoutId);
+    if (abortHandler) signal?.removeEventListener?.("abort", abortHandler);
   });
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortError();
+}
+
+function abortError() {
+  const error = new Error("Upload was stopped.");
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError";
 }
 
 function hex(value, width) {

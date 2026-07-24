@@ -4,9 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Garmin PRG WebBLE Sender</title>
-    <link rel="stylesheet" href="./styles.css?v=20260724-retry-button">
+    <link rel="stylesheet" href="./styles.css?v=20260724-stall-retry">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260724-retry-button"></script>
+    <script type="module" src="./app.js?v=20260724-stall-retry"></script>
   </head>
   <body>
     <main class="app">
@@ -141,6 +141,7 @@
           <button id="autoTuneButton" type="button" class="secondary">Auto Tune</button>
           <button id="benchmarkSendButton" type="button" class="secondary" disabled>Benchmark Send</button>
           <button id="retryButton" type="button" class="secondary" disabled>Retry</button>
+          <button id="stopUploadButton" type="button" class="secondary danger" disabled>Stop Upload</button>
           <button id="sendButton" class="primary" type="button" disabled>Send PRG</button>
         </div>
         <div class="progress-row">
