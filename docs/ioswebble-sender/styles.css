@@ -214,6 +214,10 @@ button.danger {
   gap: 8px;
 }
 
+.trusted-watch .mono {
+  white-space: pre-line;
+}
+
 .bridge-box {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

@@ -9,7 +9,8 @@ const LARGE_GFDI_PACKET_SIZE = 1500;
 const SAFE_BLE_FRAGMENT_SIZE = 20;
 const MAX_BLE_FRAGMENT_SIZE = 180;
 const MAX_PIPELINE_WINDOW = 16;
-const TRUSTED_DEVICE_KEY = "garminPrgSender.trustedDevice";
+const LEGACY_TRUSTED_DEVICE_KEY = "garminPrgSender.trustedDevice";
+const TRUSTED_DEVICES_KEY = "garminPrgSender.trustedDevices";
 const SAVED_PRG_DB_NAME = "garminPrgSender.savedPrgs";
 const SAVED_PRG_DB_VERSION = 1;
 const SAVED_PRG_STORE = "files";
@@ -39,7 +40,7 @@ const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 24;
 const WIFI_PROBE_TIMEOUT_MS = 3500;
 const WIFI_MAX_PORTS = 12;
-const PROTOCOL_TRACE_VERSION = "20260726-mlr-queue";
+const PROTOCOL_TRACE_VERSION = "20260726-trusted-list";
 const TRACE_HEX_PREVIEW_BYTES = 48;
 const MAX_PROTOCOL_TRACE_EVENTS = 6000;
 const MLR_FLAG_MASK = 0x80;
@@ -194,7 +195,7 @@ let connection = null;
 let isBusy = false;
 let isScanning = false;
 let targetConfirmed = false;
-let trustedDevice = loadTrustedDevice();
+let trustedDevices = loadTrustedDevices();
 let activeScan = null;
 let scanTimer = null;
 let scanAdvertisementHandler = null;
@@ -1022,9 +1023,9 @@ async function connectWatch() {
     updateWatchIdentity(`Connected using Garmin ${connection.kind}`);
     updateTrustedWatchUi();
     if (hasTrustedMismatch()) {
-      setStatus("Connected device does not match the trusted watch. Clear or replace the trusted watch to send.");
-      log("Connected device does not match the trusted watch; upload is blocked.");
-    } else if (!trustedDevice) {
+      setStatus("Connected device is not in trusted devices. Remember it to allow sending.");
+      log("Connected device is not in trusted devices; upload is blocked until remembered.");
+    } else if (!hasTrustedDevices()) {
       setStatus(`Connected using Garmin ${connection.kind}. Use Remember after confirming this is the right watch.`);
     } else {
       setStatus(`Connected using Garmin ${connection.kind} transport.`);
@@ -1240,7 +1241,7 @@ async function reconnectForRetry(settings, reason) {
   });
   updateWatchIdentity(`Connected using Garmin ${connection.kind}`);
   updateTrustedWatchUi();
-  if (hasTrustedMismatch()) throw new Error("Reconnected device does not match the trusted watch.");
+  if (hasTrustedMismatch()) throw new Error("Reconnected device is not in trusted devices.");
   setTargetConfirmed(true);
   log(`Reconnected using Garmin ${connection.kind} transport for ${reason}.`);
 }
@@ -3193,7 +3194,7 @@ function updateWatchIdentity(transportTextValue) {
   }
   watchIdentity.hidden = false;
   watchIdentity.classList.toggle("warn", hasTrustedMismatch());
-  watchIdentity.classList.toggle("ok", Boolean(trustedDevice) && !hasTrustedMismatch());
+  watchIdentity.classList.toggle("ok", hasTrustedDevices() && !hasTrustedMismatch());
   watchMeta.textContent = deviceLabel(selectedDevice);
   deviceIdText.textContent = selectedDevice.id || "Browser did not expose a device id";
   transportText.textContent = `${transportTextValue}. ${trustedWatchStatusText()}`;
@@ -3206,71 +3207,117 @@ function setTargetConfirmed(value) {
 
 function rememberSelectedWatch() {
   if (!selectedDevice?.id) {
-    showError("Cannot remember watch", new Error("This browser did not expose a stable device id."));
+    showError("Cannot remember device", new Error("This browser did not expose a stable device id."));
     return;
   }
-  trustedDevice = {
+  const device = {
     id: selectedDevice.id,
     label: deviceLabel(selectedDevice),
     savedAt: new Date().toISOString()
   };
-  saveTrustedDevice(trustedDevice);
+  const existingIndex = trustedDevices.findIndex((trusted) => trusted.id === device.id);
+  if (existingIndex >= 0) trustedDevices[existingIndex] = device;
+  else trustedDevices.push(device);
+  saveTrustedDevices(trustedDevices);
   setTargetConfirmed(false);
   updateWatchIdentity(connection ? `Connected using Garmin ${connection.kind}` : "Not connected");
   updateTrustedWatchUi();
-  setStatus("Trusted watch saved. Confirm target watch to send.");
-  log(`Trusted watch saved: ${trustedDevice.label}`);
+  setStatus("Trusted device saved. Confirm target watch to send.");
+  log(`Trusted device saved: ${device.label}`);
   updateButtons();
 }
 
 function clearTrustedWatch() {
-  trustedDevice = null;
-  saveTrustedDevice(null);
+  trustedDevices = [];
+  saveTrustedDevices(trustedDevices);
   setTargetConfirmed(false);
   updateWatchIdentity(connection ? `Connected using Garmin ${connection.kind}` : "Not connected");
   updateTrustedWatchUi();
-  setStatus("Trusted watch cleared.");
-  log("Trusted watch cleared.");
+  setStatus("Trusted devices cleared.");
+  log("Trusted devices cleared.");
   updateButtons();
 }
 
 function updateTrustedWatchUi() {
-  if (!trustedDevice) {
+  if (!hasTrustedDevices()) {
     trustedWatchText.textContent = "None saved";
   } else {
-    trustedWatchText.textContent = trustedDevice.label || trustedDevice.id;
+    const labels = trustedDevices.map((device) => device.label || device.id);
+    const shown = labels.slice(0, 5);
+    const extra = labels.length > shown.length ? [`+${labels.length - shown.length} more`] : [];
+    trustedWatchText.textContent = [...shown, ...extra].join("\n");
   }
-  clearWatchButton.disabled = isBusy || !trustedDevice;
+  rememberWatchButton.textContent = selectedDevice?.id && isTrustedDeviceId(selectedDevice.id) ? "Update" : "Remember";
+  clearWatchButton.disabled = isBusy || !hasTrustedDevices();
 }
 
 function hasTrustedMismatch() {
-  if (!trustedDevice) return false;
+  if (!hasTrustedDevices()) return false;
   if (!selectedDevice?.id) return true;
-  return selectedDevice.id !== trustedDevice.id;
+  return !isTrustedDeviceId(selectedDevice.id);
 }
 
 function trustedWatchStatusText() {
-  if (!trustedDevice) return "No trusted watch saved.";
-  if (!selectedDevice?.id) return "Trusted watch cannot be checked because no browser device id is available.";
-  return selectedDevice.id === trustedDevice.id ? "Matches trusted watch." : "Does not match trusted watch.";
+  if (!hasTrustedDevices()) return "No trusted devices saved.";
+  if (!selectedDevice?.id) return "Trusted device cannot be checked because no browser device id is available.";
+  return isTrustedDeviceId(selectedDevice.id) ? "Matches a trusted device." : "Not in trusted devices.";
 }
 
-function loadTrustedDevice() {
+function hasTrustedDevices() {
+  return trustedDevices.length > 0;
+}
+
+function isTrustedDeviceId(id) {
+  return Boolean(id) && trustedDevices.some((device) => device.id === id);
+}
+
+function loadTrustedDevices() {
   try {
-    const raw = localStorage.getItem(TRUSTED_DEVICE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    const raw = localStorage.getItem(TRUSTED_DEVICES_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    const devices = normalizeTrustedDevices(parsed);
+    if (devices.length) return devices;
+
+    const legacyRaw = localStorage.getItem(LEGACY_TRUSTED_DEVICE_KEY);
+    const legacyDevice = normalizeTrustedDevice(legacyRaw ? JSON.parse(legacyRaw) : null);
+    if (legacyDevice) {
+      saveTrustedDevices([legacyDevice]);
+      return [legacyDevice];
+    }
+    return [];
   } catch {
-    return null;
+    return [];
   }
 }
 
-function saveTrustedDevice(device) {
+function saveTrustedDevices(devices) {
   try {
-    if (device) localStorage.setItem(TRUSTED_DEVICE_KEY, JSON.stringify(device));
-    else localStorage.removeItem(TRUSTED_DEVICE_KEY);
+    const normalized = normalizeTrustedDevices(devices);
+    if (normalized.length) localStorage.setItem(TRUSTED_DEVICES_KEY, JSON.stringify(normalized));
+    else localStorage.removeItem(TRUSTED_DEVICES_KEY);
+    localStorage.removeItem(LEGACY_TRUSTED_DEVICE_KEY);
   } catch (error) {
-    log(`Could not save trusted watch: ${messageOf(error)}`);
+    log(`Could not save trusted devices: ${messageOf(error)}`);
   }
+}
+
+function normalizeTrustedDevices(value) {
+  const source = Array.isArray(value) ? value : [];
+  const byId = new Map();
+  for (const entry of source) {
+    const device = normalizeTrustedDevice(entry);
+    if (device) byId.set(device.id, device);
+  }
+  return Array.from(byId.values());
+}
+
+function normalizeTrustedDevice(value) {
+  if (!value || typeof value !== "object" || !value.id) return null;
+  return {
+    id: String(value.id),
+    label: String(value.label || value.id),
+    savedAt: value.savedAt ? String(value.savedAt) : new Date().toISOString()
+  };
 }
 
 function loadGithubRepoSetting() {
@@ -3684,7 +3731,7 @@ function updateButtons() {
   if (wifiProbeButton) wifiProbeButton.disabled = isBusy || isScanning || isWifiProbing;
   if (wifiStopButton) wifiStopButton.disabled = !isWifiProbing;
   rememberWatchButton.disabled = isBusy || isScanning || !connection || !selectedDevice?.id;
-  clearWatchButton.disabled = isBusy || isScanning || !trustedDevice;
+  clearWatchButton.disabled = isBusy || isScanning || !hasTrustedDevices();
   confirmTargetInput.disabled = isBusy || isScanning || !connection || hasTrustedMismatch();
   sendButton.disabled = isBusy || isScanning || !selectedFile || !connection || !targetConfirmed || hasTrustedMismatch();
   if (benchmarkSendButton) benchmarkSendButton.disabled = sendButton.disabled;
