@@ -39,7 +39,7 @@ const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 24;
 const WIFI_PROBE_TIMEOUT_MS = 3500;
 const WIFI_MAX_PORTS = 12;
-const PROTOCOL_TRACE_VERSION = "20260725-v2-pair";
+const PROTOCOL_TRACE_VERSION = "20260726-mlr-continuous";
 const TRACE_HEX_PREVIEW_BYTES = 48;
 const MAX_PROTOCOL_TRACE_EVENTS = 6000;
 const MLR_FLAG_MASK = 0x80;
@@ -151,6 +151,7 @@ const retryButton = document.querySelector("#retryButton");
 const stopUploadButton = document.querySelector("#stopUploadButton");
 const riskyPipelineInput = document.querySelector("#riskyPipelineInput");
 const reliableMlrInput = document.querySelector("#reliableMlrInput");
+const mlrAckDrainInput = document.querySelector("#mlrAckDrainInput");
 const forceLargeFragmentInput = document.querySelector("#forceLargeFragmentInput");
 const progressBar = document.querySelector("#progressBar");
 const progressText = document.querySelector("#progressText");
@@ -1012,6 +1013,7 @@ async function connectWatch() {
       v2PairShortValue: readV2PairShortValue(),
       writeFragmentSize: readBleFragmentSize(),
       writeDelayMs: readNumber(writeDelayInput, 0),
+      mlrAckDrain: readMlrAckDrain(),
       reliableMlr: Boolean(reliableMlrInput?.checked)
     });
     setTargetConfirmed(false);
@@ -1123,6 +1125,11 @@ async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt, sig
   if (settings.pipelineWindow > 1) {
     log(`Experimental pipeline window ${settings.pipelineWindow}. If upload fails, retry with Pipeline chunks 1.`);
   }
+  if (String(connection?.kind || "").includes("reliable MLR") && settings.mlrAckDrain) {
+    log("Conservative MLR ACK drain is enabled; each GFDI packet waits for its MLR fragments to be acknowledged.");
+  } else if (String(connection?.kind || "").includes("reliable MLR")) {
+    log("Continuous MLR flow is enabled; GFDI packets can queue behind the MLR send window.");
+  }
   try {
     await uploadPrg(selectedFile.data, connection, {
       ...settings,
@@ -1226,6 +1233,7 @@ async function reconnectForRetry(settings, reason) {
     v2PairShortValue: settings.v2PairShortValue ?? readV2PairShortValue(),
     writeFragmentSize: settings.fragmentSize,
     writeDelayMs: settings.writeDelayMs,
+    mlrAckDrain: Boolean(settings.mlrAckDrain),
     reliableMlr: Boolean(reliableMlrInput?.checked)
   });
   updateWatchIdentity(`Connected using Garmin ${connection.kind}`);
@@ -1369,6 +1377,7 @@ class BaseTransport {
     this.kind = kind;
     this.writeFragmentSize = clampNumber(options.writeFragmentSize, SAFE_BLE_FRAGMENT_SIZE, MAX_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
     this.writeDelayMs = clampNumber(options.writeDelayMs, 0, 25, 0);
+    this.mlrAckDrain = Boolean(options.mlrAckDrain);
     this.decoder = new CobsDecoder();
     this.messages = [];
     this.waiters = [];
@@ -1525,7 +1534,7 @@ class V2Transport extends BaseTransport {
     if (this.gfdiHandle === null) throw new Error("v2 GFDI handle is not registered.");
     const encoded = cobsEncode(packet);
     if (this.mlr) {
-      await this.mlr.sendMessage(encoded, signal);
+      await this.mlr.sendMessage(encoded, signal, { drain: this.mlrAckDrain });
       return;
     }
     const fragmentSize = Math.max(1, this.writeFragmentSize - 1);
@@ -1613,7 +1622,7 @@ class MlrSession {
     }
   }
 
-  async sendMessage(message, signal = null) {
+  async sendMessage(message, signal = null, options = {}) {
     if (!message?.length) return;
     const fragmentSize = Math.max(1, this.maxPacketSize() - 2);
     const fragmentCount = Math.ceil(message.length / fragmentSize);
@@ -1631,7 +1640,7 @@ class MlrSession {
       await this.transport.writeRaw(packet);
       if (this.numSentUnacked() === 1) this.startRetransmissionTimer();
     }
-    await this.waitForAckDrain(signal);
+    if (options.drain) await this.waitForAckDrain(signal);
   }
 
   onPacketReceived(packet) {
@@ -2378,6 +2387,7 @@ function currentTransferSettingsForTrace() {
     pipeline: Number(pipelineWindowInput?.value || 0),
     writeDelayMs: Number(writeDelayInput?.value || 0),
     reliableMlr: Boolean(reliableMlrInput?.checked),
+    mlrAckDrain: Boolean(mlrAckDrainInput?.checked),
     forceLargeFragment: Boolean(forceLargeFragmentInput?.checked),
     keepAwake: Boolean(keepAwakeInput?.checked)
   };
@@ -3260,6 +3270,7 @@ function currentUploadSettings() {
     fragmentSize: readBleFragmentSize(),
     pipelineWindow: readPipelineWindow(),
     writeDelayMs: readWriteDelayMs(),
+    mlrAckDrain: readMlrAckDrain(),
     label: "current"
   };
 }
@@ -3275,6 +3286,7 @@ function applyTransportSettings(transport, settings) {
   if (!transport) return;
   transport.writeFragmentSize = clampNumber(settings.fragmentSize, SAFE_BLE_FRAGMENT_SIZE, MAX_BLE_FRAGMENT_SIZE, SAFE_BLE_FRAGMENT_SIZE);
   transport.writeDelayMs = clampNumber(settings.writeDelayMs, 0, 25, 0);
+  transport.mlrAckDrain = Boolean(settings.mlrAckDrain);
 }
 
 function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set()) {
@@ -3311,6 +3323,7 @@ function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set
     ? [baseSettings, ...fragmentProfiles, ...largeGfdiProfiles, ...riskyProfiles, FAST_FENIX6_TUNING, ...stableProfiles]
     : [baseSettings, ...fragmentProfiles, ...largeGfdiProfiles, FAST_FENIX6_TUNING, ...stableProfiles]
   return uniqueBenchmarkProfiles(profiles
+    .map((profile) => ({ ...profile, mlrAckDrain: Boolean(baseSettings.mlrAckDrain) }))
     .filter((profile) => fileSize >= Math.max(1024, profile.maxPacketSize * profile.pipelineWindow))
     .filter((profile) => !failedProfiles.has(benchmarkProfileKey(profile))));
 }
@@ -3666,6 +3679,10 @@ function readPipelineWindow() {
   const value = clampNumber(pipelineWindowInput.value, 1, MAX_PIPELINE_WINDOW, 1);
   pipelineWindowInput.value = String(value);
   return value;
+}
+
+function readMlrAckDrain() {
+  return Boolean(mlrAckDrainInput?.checked);
 }
 
 function readWriteDelayMs() {

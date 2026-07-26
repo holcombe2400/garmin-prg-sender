@@ -6,7 +6,7 @@
     <title>Garmin PRG Bluetooth Sender</title>
     <link rel="stylesheet" href="./styles.css?v=20260725-v2-pair">
     <script src="https://beacio.com/beacio.js"></script>
-    <script type="module" src="./app.js?v=20260725-v2-pair"></script>
+    <script type="module" src="./app.js?v=20260726-mlr-continuous"></script>
   </head>
   <body>
     <main class="app">
@@ -164,6 +164,10 @@
         <label class="toggle-row">
           <input id="reliableMlrInput" type="checkbox">
           <span>Try reliable MLR transport on next connect</span>
+        </label>
+        <label class="toggle-row">
+          <input id="mlrAckDrainInput" type="checkbox">
+          <span>Drain MLR after every GFDI packet</span>
         </label>
         <label class="toggle-row">
           <input id="forceLargeFragmentInput" type="checkbox">
