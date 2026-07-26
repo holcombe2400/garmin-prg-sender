@@ -26,7 +26,7 @@ const FAST_FENIX6_TUNING = Object.freeze({
   label: "fenix 6 fast preset"
 });
 const FAST_FENIX6_MLR_TUNING = Object.freeze({
-  maxPacketSize: 1500,
+  maxPacketSize: 3072,
   fragmentSize: SAFE_BLE_FRAGMENT_SIZE,
   pipelineWindow: 8,
   writeDelayMs: 0,
@@ -39,7 +39,7 @@ const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 24;
 const WIFI_PROBE_TIMEOUT_MS = 3500;
 const WIFI_MAX_PORTS = 12;
-const PROTOCOL_TRACE_VERSION = "20260726-mlr-continuous";
+const PROTOCOL_TRACE_VERSION = "20260726-mlr-3072";
 const TRACE_HEX_PREVIEW_BYTES = 48;
 const MAX_PROTOCOL_TRACE_EVENTS = 6000;
 const MLR_FLAG_MASK = 0x80;
@@ -3294,12 +3294,11 @@ function buildBenchmarkProfiles(baseSettings, fileSize, failedProfiles = new Set
   const largeGfdiPipelineWindow = clampNumber(baseSettings.pipelineWindow, 1, MAX_PIPELINE_WINDOW, FAST_FENIX6_MLR_TUNING.pipelineWindow);
   const largeGfdiDelayMs = clampNumber(baseSettings.writeDelayMs, 0, 25, 0);
   const largeGfdiProfiles = shouldProbeLargeGfdi(baseSettings) ? [
-    { maxPacketSize: 1500, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 1500/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
-    { maxPacketSize: 2048, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 2048/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
     { maxPacketSize: 3072, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 3072/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
-    { maxPacketSize: 4096, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 4096/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
-    { maxPacketSize: 6144, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 6144/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
-    { maxPacketSize: 8192, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 8192/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` }
+    { maxPacketSize: 3584, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 3584/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
+    { maxPacketSize: 3840, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 3840/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
+    { maxPacketSize: 2048, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 2048/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` },
+    { maxPacketSize: 1500, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: largeGfdiPipelineWindow, writeDelayMs: largeGfdiDelayMs, label: `MLR probe 1500/20/${largeGfdiPipelineWindow}/${largeGfdiDelayMs}` }
   ] : [];
   const stableProfiles = [
     { maxPacketSize: 375, fragmentSize: SAFE_BLE_FRAGMENT_SIZE, pipelineWindow: 1, writeDelayMs: 0, label: "375/20/1/0" },
