@@ -39,7 +39,7 @@ const GFDI_WRITE_TIMEOUT_MS = 10000;
 const MAX_BENCHMARK_RESTARTS = 24;
 const WIFI_PROBE_TIMEOUT_MS = 3500;
 const WIFI_MAX_PORTS = 12;
-const PROTOCOL_TRACE_VERSION = "20260726-mlr-3072";
+const PROTOCOL_TRACE_VERSION = "20260726-mlr-queue";
 const TRACE_HEX_PREVIEW_BYTES = 48;
 const MAX_PROTOCOL_TRACE_EVENTS = 6000;
 const MLR_FLAG_MASK = 0x80;
@@ -55,6 +55,8 @@ const MLR_INITIAL_RETRANSMISSION_TIMEOUT_MS = 1000;
 const MLR_MAX_RETRANSMISSION_TIMEOUT_MS = 20000;
 const MLR_SEND_WINDOW_TIMEOUT_MS = 8000;
 const MLR_ACK_DRAIN_TIMEOUT_MS = 10000;
+const MLR_QUEUE_TIMEOUT_MS = 10000;
+const MLR_MAX_QUEUED_FRAGMENTS = 4096;
 const MLR_MAX_RETRANSMISSION_EVENTS = 5;
 const MLR_LARGE_FRAGMENT_MAX_RETRANSMISSION_EVENTS = 2;
 
@@ -1128,7 +1130,7 @@ async function sendPrgAttempt({ benchmark, failedBenchmarkProfiles, attempt, sig
   if (String(connection?.kind || "").includes("reliable MLR") && settings.mlrAckDrain) {
     log("Conservative MLR ACK drain is enabled; each GFDI packet waits for its MLR fragments to be acknowledged.");
   } else if (String(connection?.kind || "").includes("reliable MLR")) {
-    log("Continuous MLR flow is enabled; GFDI packets can queue behind the MLR send window.");
+    log("Queued MLR pump is enabled; GFDI packets can queue behind the MLR send window.");
   }
   try {
     await uploadPrg(selectedFile.data, connection, {
@@ -1617,6 +1619,9 @@ class MlrSession {
     this.failure = null;
     this.closed = false;
     this.lastLoggedShape = null;
+    this.sendQueue = [];
+    this.queueWaiters = [];
+    this.sendPumpPromise = null;
     if (this.usesLargeBleFragment()) {
       log(`MLR large-fragment mode: BLE fragment ${this.transport.writeFragmentSize}, internal MLR window ${this.maxNumUnackedSend}.`);
     }
@@ -1624,23 +1629,90 @@ class MlrSession {
 
   async sendMessage(message, signal = null, options = {}) {
     if (!message?.length) return;
+    if (options.drain) {
+      await this.sendMessageInline(message, signal);
+      return;
+    }
+    await this.enqueueMessage(message, signal);
+  }
+
+  async sendMessageInline(message, signal = null) {
+    const fragments = this.fragmentMessage(message);
+    for (const data of fragments) {
+      throwIfAborted(signal);
+      await this.sendFragment(data, signal);
+    }
+    await this.waitForAckDrain(signal);
+  }
+
+  async enqueueMessage(message, signal = null) {
+    const fragments = this.fragmentMessage(message);
+    await this.waitForQueueSpace(fragments.length, signal);
+    throwIfAborted(signal);
+    if (this.failure) throw this.failure;
+    if (this.closed) throw new Error("MLR transport is closed.");
+    this.sendQueue.push(...fragments);
+    this.startSendPump();
+  }
+
+  fragmentMessage(message) {
     const fragmentSize = Math.max(1, this.maxPacketSize() - 2);
     const fragmentCount = Math.ceil(message.length / fragmentSize);
     this.logSendShape(message.length, fragmentSize, fragmentCount);
+    const fragments = [];
     for (let offset = 0; offset < message.length; offset += fragmentSize) {
-      throwIfAborted(signal);
-      if (this.failure) throw this.failure;
-      await this.waitForSendWindow(signal);
-      const data = message.slice(offset, Math.min(message.length, offset + fragmentSize));
-      const reqNum = this.nextRcvSeq;
-      const seqNum = this.nextSendSeq;
-      const packet = this.createPacket(reqNum, seqNum, data);
-      this.sentFragments[seqNum] = { packet, reqNum, seqNum };
-      this.nextSendSeq = this.nextSeq(this.nextSendSeq);
-      await this.transport.writeRaw(packet);
-      if (this.numSentUnacked() === 1) this.startRetransmissionTimer();
+      fragments.push(message.slice(offset, Math.min(message.length, offset + fragmentSize)));
     }
-    if (options.drain) await this.waitForAckDrain(signal);
+    return fragments;
+  }
+
+  async sendFragment(data, signal = null) {
+    if (this.failure) throw this.failure;
+    await this.waitForSendWindow(signal);
+    const reqNum = this.nextRcvSeq;
+    const seqNum = this.nextSendSeq;
+    const packet = this.createPacket(reqNum, seqNum, data);
+    this.sentFragments[seqNum] = { packet, reqNum, seqNum };
+    this.nextSendSeq = this.nextSeq(this.nextSendSeq);
+    await this.transport.writeRaw(packet);
+    if (this.numSentUnacked() === 1) this.startRetransmissionTimer();
+  }
+
+  startSendPump() {
+    if (this.sendPumpPromise || this.closed || this.failure) return;
+    this.sendPumpPromise = this.runSendPump()
+      .catch((error) => {
+        if (!this.closed) this.fail(error);
+      })
+      .finally(() => {
+        this.sendPumpPromise = null;
+        this.notifyQueueWaiters();
+        if (this.sendQueue.length && !this.closed && !this.failure) this.startSendPump();
+      });
+  }
+
+  async runSendPump() {
+    while (!this.closed && !this.failure && this.sendQueue.length) {
+      const data = this.sendQueue.shift();
+      this.notifyQueueWaiters();
+      await this.sendFragment(data);
+    }
+    if (this.failure) throw this.failure;
+  }
+
+  async waitForQueueSpace(fragmentCount, signal) {
+    if (this.failure) throw this.failure;
+    while (!this.closed && this.sendQueue.length + fragmentCount > MLR_MAX_QUEUED_FRAGMENTS) {
+      await withTimeout(
+        new Promise((resolve) => this.queueWaiters.push(resolve)),
+        MLR_QUEUE_TIMEOUT_MS,
+        "Timed out waiting for MLR send queue space",
+        signal
+      );
+      if (this.failure) throw this.failure;
+    }
+    if (this.failure) throw this.failure;
+    if (this.closed) throw new Error("MLR transport is closed.");
   }
 
   onPacketReceived(packet) {
@@ -1817,9 +1889,15 @@ class MlrSession {
     for (const resolve of waiters) resolve();
   }
 
+  notifyQueueWaiters() {
+    const waiters = this.queueWaiters.splice(0);
+    for (const resolve of waiters) resolve();
+  }
+
   fail(error) {
     if (this.failure || this.closed) return;
     this.failure = error;
+    this.sendQueue.length = 0;
     this.stopRetransmissionTimer();
     if (this.ackTimer) {
       window.clearTimeout(this.ackTimer);
@@ -1828,13 +1906,16 @@ class MlrSession {
     log(messageOf(error));
     this.transport.failPendingReceives(error);
     this.notifyWindowWaiters();
+    this.notifyQueueWaiters();
   }
 
   close() {
     this.closed = true;
+    this.sendQueue.length = 0;
     if (this.ackTimer) window.clearTimeout(this.ackTimer);
     this.stopRetransmissionTimer();
     this.notifyWindowWaiters();
+    this.notifyQueueWaiters();
     this.sentFragments.fill(null);
   }
 }
@@ -3085,9 +3166,8 @@ function updateTransferStats(stats, offset) {
   const firstSample = samples[0];
   const recentElapsedSec = Math.max((now - firstSample.time) / 1000, 0);
   const recentBps = recentElapsedSec > 0.25 ? (cleanOffset - firstSample.offset) / recentElapsedSec : 0;
-  const etaBps = recentBps > 0 ? recentBps : avgBps;
   const remaining = Math.max(0, stats.total - cleanOffset);
-  const etaSec = etaBps > 1 ? remaining / etaBps : null;
+  const etaSec = avgBps > 1 ? remaining / avgBps : null;
 
   return { avgBps, recentBps, etaSec, elapsedSec };
 }
