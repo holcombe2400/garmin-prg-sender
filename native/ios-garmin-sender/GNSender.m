@@ -16,6 +16,15 @@ static NSString * const GNTraceDirectory = @"/var/mobile/Documents/GarminNativeS
 
 typedef BOOL (^GNStatusMatcher)(NSDictionary *status);
 
+static NSString *GNLocalHex(NSData *data) {
+    const uint8_t *bytes = data.bytes;
+    NSMutableString *hex = [NSMutableString stringWithCapacity:data.length * 2];
+    for (NSUInteger i = 0; i < data.length; i++) {
+        [hex appendFormat:@"%02x", bytes[i]];
+    }
+    return hex;
+}
+
 @interface GNStatusWaiter : NSObject
 @property (nonatomic, copy) GNStatusMatcher matcher;
 @property (nonatomic, strong) dispatch_semaphore_t semaphore;
@@ -35,6 +44,7 @@ typedef BOOL (^GNStatusMatcher)(NSDictionary *status);
 @interface GNSender () <CBCentralManagerDelegate, CBPeripheralDelegate>
 @property (nonatomic, strong) CBCentralManager *central;
 @property (nonatomic, strong) NSMutableArray<CBPeripheral *> *discovered;
+@property (nonatomic, strong) NSMutableSet<NSUUID *> *garminIdentifiers;
 @property (nonatomic, strong) CBPeripheral *peripheral;
 @property (nonatomic, strong) CBCharacteristic *rx;
 @property (nonatomic, strong) CBCharacteristic *tx;
@@ -71,6 +81,7 @@ typedef BOOL (^GNStatusMatcher)(NSDictionary *status);
         _pipelineWindow = 8;
         _reliableMlr = YES;
         _discovered = [NSMutableArray array];
+        _garminIdentifiers = [NSMutableSet set];
         _decoder = [[GNCobsDecoder alloc] init];
         _trace = [[GNTrace alloc] init];
         _decodedQueue = [NSMutableArray array];
@@ -89,7 +100,8 @@ typedef BOOL (^GNStatusMatcher)(NSDictionary *status);
 - (void)startScan {
     self.stopped = NO;
     [self.discovered removeAllObjects];
-    [self log:@"Scanning for Garmin BLE advertisements..."];
+    [self.garminIdentifiers removeAllObjects];
+    [self log:@"Scanning for Garmin BLE advertisements and nearby connectable BLE devices..."];
     if (self.central.state != CBManagerStatePoweredOn) {
         [self log:[NSString stringWithFormat:@"Bluetooth is not powered on yet; state=%ld", (long)self.central.state]];
         return;
@@ -100,12 +112,23 @@ typedef BOOL (^GNStatusMatcher)(NSDictionary *status);
 
 - (void)connectFirstDiscoveredPeripheral {
     if (!self.discovered.count) {
-        [self log:@"No Garmin-like peripheral discovered yet. Tap Scan Garmin first."];
+        [self log:@"No connectable BLE peripheral discovered yet. Tap Scan Garmin first and wait 10-20 seconds."];
         return;
     }
-    self.peripheral = self.discovered.firstObject;
+    CBPeripheral *selected = nil;
+    for (CBPeripheral *peripheral in self.discovered) {
+        if ([self.garminIdentifiers containsObject:peripheral.identifier]) {
+            selected = peripheral;
+            break;
+        }
+    }
+    selected = selected ?: self.discovered.firstObject;
+    self.peripheral = selected;
     self.peripheral.delegate = self;
     [self.central stopScan];
+    if (![self.garminIdentifiers containsObject:self.peripheral.identifier]) {
+        [self log:@"No Garmin-like candidate was marked, trying the first connectable BLE device seen."];
+    }
     [self log:[NSString stringWithFormat:@"Connecting to %@ %@", self.peripheral.name ?: @"Unnamed", self.peripheral.identifier.UUIDString]];
     [self updateStatus:@"Connecting..."];
     [self.central connectPeripheral:self.peripheral options:nil];
@@ -156,25 +179,57 @@ typedef BOOL (^GNStatusMatcher)(NSDictionary *status);
                   RSSI:(NSNumber *)RSSI {
     (void)central;
     NSString *name = peripheral.name ?: advertisementData[CBAdvertisementDataLocalNameKey] ?: @"";
-    NSArray *services = advertisementData[CBAdvertisementDataServiceUUIDsKey] ?: @[];
-    BOOL hasFE1F = NO;
-    for (CBUUID *uuid in services) {
-        if ([[uuid.UUIDString uppercaseString] isEqualToString:@"FE1F"]) hasFE1F = YES;
+    NSMutableArray<CBUUID *> *services = [NSMutableArray array];
+    for (NSString *key in @[CBAdvertisementDataServiceUUIDsKey,
+                            CBAdvertisementDataOverflowServiceUUIDsKey,
+                            CBAdvertisementDataSolicitedServiceUUIDsKey]) {
+        NSArray *values = advertisementData[key];
+        if ([values isKindOfClass:[NSArray class]]) {
+            [services addObjectsFromArray:values];
+        }
     }
-    BOOL looksGarmin = hasFE1F || [name.lowercaseString containsString:@"garmin"] || [name.lowercaseString containsString:@"fenix"];
     NSMutableArray<NSString *> *serviceNames = [NSMutableArray array];
-    for (CBUUID *uuid in services) [serviceNames addObject:uuid.UUIDString ?: @""];
+    BOOL hasFE1F = NO;
+    BOOL hasGarminV2 = NO;
+    for (CBUUID *uuid in services) {
+        NSString *uuidString = [uuid.UUIDString uppercaseString] ?: @"";
+        if (!uuidString.length || [serviceNames containsObject:uuidString]) continue;
+        [serviceNames addObject:uuidString];
+        if ([uuidString isEqualToString:@"FE1F"]) hasFE1F = YES;
+        if ([uuidString isEqualToString:GNV2ServiceUUID] || [uuidString hasPrefix:@"6A4E28"]) hasGarminV2 = YES;
+    }
+    BOOL isConnectable = [advertisementData[CBAdvertisementDataIsConnectable] boolValue];
+    NSData *manufacturerData = advertisementData[CBAdvertisementDataManufacturerDataKey];
+    BOOL looksGarmin = hasFE1F || hasGarminV2 || [name.lowercaseString containsString:@"garmin"] || [name.lowercaseString containsString:@"fenix"];
     [self.trace recordLayer:@"adv" direction:@"rx" data:[NSData data] metadata:@{
         @"name": name ?: @"",
         @"rssi": RSSI ?: @0,
         @"services": [serviceNames componentsJoinedByString:@","],
+        @"manufacturer": manufacturerData ? GNLocalHex(manufacturerData) : @"",
+        @"connectable": @(isConnectable),
         @"garminCandidate": @(looksGarmin)
     }];
-    if (!looksGarmin) return;
+    if (looksGarmin) {
+        [self.garminIdentifiers addObject:peripheral.identifier];
+    }
     if (![self.discovered containsObject:peripheral]) {
-        [self.discovered addObject:peripheral];
-        [self log:[NSString stringWithFormat:@"Found candidate: %@ %@ RSSI=%@", name.length ? name : @"Unnamed", peripheral.identifier.UUIDString, RSSI]];
-        [self updateStatus:@"Garmin candidate found. Tap Connect First."];
+        NSString *label = name.length ? name : @"Unnamed";
+        [self log:[NSString stringWithFormat:@"Seen BLE%@ %@ %@ RSSI=%@ services=%@",
+                   looksGarmin ? @" candidate" : @"",
+                   label,
+                   peripheral.identifier.UUIDString,
+                   RSSI,
+                   serviceNames.count ? [serviceNames componentsJoinedByString:@","] : @"none"]];
+        if (isConnectable || looksGarmin) {
+            if (looksGarmin) {
+                [self.discovered insertObject:peripheral atIndex:0];
+                [self updateStatus:@"Garmin candidate found. Tap Connect First."];
+            } else {
+                [self.discovered addObject:peripheral];
+                [self updateStatus:[NSString stringWithFormat:@"Saw %lu connectable BLE device(s). Waiting for Garmin...",
+                                    (unsigned long)self.discovered.count]];
+            }
+        }
     }
 }
 
