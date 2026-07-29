@@ -16,8 +16,7 @@ static unsigned short (*origMessageSoftwareVersion)(id, SEL);
 static void (*origCancelPeripheralConnection)(id, SEL, id);
 static NSString *(*origLocalizedString)(id, SEL, NSString *, NSString *, NSString *);
 static id (*origAlertController)(id, SEL, NSString *, NSString *, NSInteger);
-static id (*origGDIFileSenderInit)(id, SEL);
-static void (*origGDIFileSenderSendFileToEdge)(id, SEL, id, unsigned long long, unsigned long long, id, unsigned long long);
+static void (*origGDIFileSenderSendFileToEdge)(id, SEL, id, NSUInteger, NSUInteger, id, NSUInteger);
 static id GCBLastFileSender;
 static UIButton *GCBUploadButton;
 
@@ -238,17 +237,11 @@ static id GCBAlertController(id self, SEL _cmd, NSString *title, NSString *messa
     return origAlertController ? origAlertController(self, _cmd, title, message, style) : nil;
 }
 
-static id GCBGDIFileSenderInit(id self, SEL _cmd) {
-    id value = origGDIFileSenderInit ? origGDIFileSenderInit(self, _cmd) : self;
-    GCBLastFileSender = value;
-    GCBLog(@"GDIFileSender init captured=%@ types sendFile=%@", value, GCBTypeEncodingForSelector(object_getClass(value), @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:)));
-    return value;
-}
-
-static void GCBGDIFileSenderSendFileToEdge(id self, SEL _cmd, id file, unsigned long long dataType, unsigned long long subType, id deviceFilePath, unsigned long long identifier) {
+static void GCBGDIFileSenderSendFileToEdge(id self, SEL _cmd, id file, NSUInteger dataType, NSUInteger subType, id deviceFilePath, NSUInteger identifier) {
     GCBLastFileSender = self;
-    GCBLog(@"GDIFileSender sendFileToEdge self=%@ file=%@ fileClass=%@ dataType=%llu subType=%llu deviceFilePath=%@ identifier=%llu stack=%@",
-           self, file, file ? NSStringFromClass([file class]) : @"<nil>", dataType, subType, deviceFilePath, identifier, GCBStack());
+    GCBLog(@"GDIFileSender sendFileToEdge self=%p file=%p fileClass=%@ dataType=%lu subType=%lu deviceFilePathClass=%@ identifier=%lu stack=%@",
+           self, file, file ? NSStringFromClass([file class]) : @"<nil>", (unsigned long)dataType, (unsigned long)subType,
+           deviceFilePath ? NSStringFromClass([deviceFilePath class]) : @"<nil>", (unsigned long)identifier, GCBStack());
     if (origGDIFileSenderSendFileToEdge) origGDIFileSenderSendFileToEdge(self, _cmd, file, dataType, subType, deviceFilePath, identifier);
 }
 
@@ -275,7 +268,7 @@ static void GCBUploadPRGNow(void) {
         return;
     }
 
-    uint64_t identifier = ((uint64_t)[[NSDate date] timeIntervalSince1970] << 16) | (arc4random() & 0xffff);
+    NSUInteger identifier = (((NSUInteger)[[NSDate date] timeIntervalSince1970]) ^ (NSUInteger)arc4random());
     id nilPath = nil;
     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:signature];
     inv.target = sender;
@@ -287,8 +280,8 @@ static void GCBUploadPRGNow(void) {
     GCBSetInvocationArg(inv, 6, [signature getArgumentTypeAtIndex:6], nil, identifier);
     [inv retainArguments];
 
-    GCBLog(@"Upload PRG invoking sender=%@ path=%@ size=%lu type=%u subtype=%u identifier=%llu signature=%@",
-           sender, path, (unsigned long)size, GCBPRGType, GCBPRGSubtype, identifier, signature);
+    GCBLog(@"Upload PRG invoking sender=%p path=%@ size=%lu type=%u subtype=%u identifier=%lu signature=%@",
+           sender, path, (unsigned long)size, GCBPRGType, GCBPRGSubtype, (unsigned long)identifier, signature);
     [inv invoke];
     GCBShowAlert(@"Upload PRG", [NSString stringWithFormat:@"Started via Garmin Connect sender.\n%lu bytes", (unsigned long)size]);
 }
@@ -413,8 +406,8 @@ static void GCBInstallHooks(void) {
 
     Class fileSender = objc_getClass("GDIFileSender");
     if (fileSender) {
-        GCBHookInstance(fileSender, @selector(init), (IMP)GCBGDIFileSenderInit, (IMP *)&origGDIFileSenderInit);
         GCBHookInstance(fileSender, @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:), (IMP)GCBGDIFileSenderSendFileToEdge, (IMP *)&origGDIFileSenderSendFileToEdge);
+        GCBLog(@"GDIFileSender sendFileToEdge types=%@", GCBTypeEncodingForSelector(fileSender, @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:)));
     } else {
         GCBLog(@"GDIFileSender class not found");
     }
@@ -422,7 +415,9 @@ static void GCBInstallHooks(void) {
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
         GCBInstallUploadButton();
     }];
-    GCBInstallUploadButton();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        GCBInstallUploadButton();
+    });
 }
 
 __attribute__((constructor))
