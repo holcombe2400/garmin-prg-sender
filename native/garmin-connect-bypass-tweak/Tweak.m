@@ -645,8 +645,7 @@ static void GCBHookAllClassesWithInstanceSelector(SEL selector, IMP replacement)
         Method method = class_getInstanceMethod(cls, selector);
         if (!method) continue;
         const char *types = method_getTypeEncoding(method);
-        NSString *typeString = types ? [NSString stringWithUTF8String:types] : nil;
-        if (![typeString isEqualToString:@"@20@0:4@8@?12@?16"]) continue;
+        if (!types || strcmp(types, "@20@0:4@8@?12@?16") != 0) continue;
         NSString *name = [NSString stringWithUTF8String:class_getName(cls)];
         [matches addObject:name ?: @"<unknown>"];
         GCBHookInstanceMapped(cls, selector, replacement);
