@@ -530,6 +530,12 @@ static void GCBInstallHooks(void) {
         GCBLog(@"No runtime class owns %@", NSStringFromSelector(sendFileSelector));
     }
 
+    GCBDumpMethodsForClassName("_TtC16GarminDeviceSync0aB0C");
+    GCBDumpMethodsForClassName("_TtC16GarminDeviceSync10FileSender");
+    GCBDumpMethodsForClassName("_TtC16GarminDeviceSync14FileSenderTask");
+    GCBFindClassWithInstanceSelector(NSSelectorFromString(@"sendFile:fileType:fileSubType:filePathOnDevice:fileIdentifier:progress:completion:"), @"FileSender");
+    GCBFindClassWithInstanceSelector(NSSelectorFromString(@"initWithDevice:"), @"FileSender");
+
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
         GCBInstallUploadButton();
     }];
