@@ -90,7 +90,7 @@ typedef BOOL (^GNStatusMatcher)(NSDictionary *status);
     self.stopped = NO;
     [self.discovered removeAllObjects];
     [self log:@"Scanning for Garmin BLE advertisements..."];
-    if (self.central.state != CBCentralManagerStatePoweredOn) {
+    if (self.central.state != CBManagerStatePoweredOn) {
         [self log:[NSString stringWithFormat:@"Bluetooth is not powered on yet; state=%ld", (long)self.central.state]];
         return;
     }
