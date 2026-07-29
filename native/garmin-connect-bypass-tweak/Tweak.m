@@ -16,6 +16,7 @@ static unsigned short (*origMessageSoftwareVersion)(id, SEL);
 static void (*origCancelPeripheralConnection)(id, SEL, id);
 static NSString *(*origLocalizedString)(id, SEL, NSString *, NSString *, NSString *);
 static id (*origAlertController)(id, SEL, NSString *, NSString *, NSInteger);
+static id (*origGDIFileSenderInitWithDelegate)(id, SEL, id, id);
 static void (*origGDIFileSenderSendFileToEdge)(id, SEL, id, NSUInteger, NSUInteger, id, NSUInteger);
 static id GCBLastFileSender;
 static UIButton *GCBUploadButton;
@@ -237,6 +238,16 @@ static id GCBAlertController(id self, SEL _cmd, NSString *title, NSString *messa
     return origAlertController ? origAlertController(self, _cmd, title, message, style) : nil;
 }
 
+static id GCBGDIFileSenderInitWithDelegate(id self, SEL _cmd, id delegate, id taskManager) {
+    id value = origGDIFileSenderInitWithDelegate ? origGDIFileSenderInitWithDelegate(self, _cmd, delegate, taskManager) : self;
+    GCBLastFileSender = value;
+    GCBLog(@"File sender init captured self=%p class=%@ delegateClass=%@ taskManagerClass=%@",
+           value, value ? NSStringFromClass([value class]) : @"<nil>",
+           delegate ? NSStringFromClass([delegate class]) : @"<nil>",
+           taskManager ? NSStringFromClass([taskManager class]) : @"<nil>");
+    return value;
+}
+
 static void GCBGDIFileSenderSendFileToEdge(id self, SEL _cmd, id file, NSUInteger dataType, NSUInteger subType, id deviceFilePath, NSUInteger identifier) {
     GCBLastFileSender = self;
     GCBLog(@"GDIFileSender sendFileToEdge self=%p file=%p fileClass=%@ dataType=%lu subType=%lu deviceFilePathClass=%@ identifier=%lu stack=%@",
@@ -267,13 +278,19 @@ static void GCBUploadPRGNow(void) {
         GCBShowAlert(@"Upload PRG", @"Garmin file sender signature was not usable. I logged the details.");
         return;
     }
+    NSData *prgData = [NSData dataWithContentsOfFile:path options:0 error:nil];
+    if (!prgData.length) {
+        GCBLog(@"Upload PRG could not read %@", path);
+        GCBShowAlert(@"Upload PRG", @"Could not read the PRG file.");
+        return;
+    }
 
     NSUInteger identifier = (((NSUInteger)[[NSDate date] timeIntervalSince1970]) ^ (NSUInteger)arc4random());
     id nilPath = nil;
     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:signature];
     inv.target = sender;
     inv.selector = selector;
-    GCBSetInvocationArg(inv, 2, [signature getArgumentTypeAtIndex:2], path, 0);
+    GCBSetInvocationArg(inv, 2, [signature getArgumentTypeAtIndex:2], prgData, 0);
     GCBSetInvocationArg(inv, 3, [signature getArgumentTypeAtIndex:3], nil, GCBPRGType);
     GCBSetInvocationArg(inv, 4, [signature getArgumentTypeAtIndex:4], nil, GCBPRGSubtype);
     GCBSetInvocationArg(inv, 5, [signature getArgumentTypeAtIndex:5], nilPath, 0);
@@ -362,6 +379,24 @@ static void GCBDumpMethodsForClassName(const char *name) {
     GCBLog(@"methods %s %@", name, [parts componentsJoinedByString:@", "]);
 }
 
+static Class GCBFindClassWithInstanceSelector(SEL selector, NSString *nameHint) {
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
+    Class found = Nil;
+    NSMutableArray *matches = [NSMutableArray array];
+    for (unsigned int i = 0; i < count; i++) {
+        Class cls = classes[i];
+        if (!class_getInstanceMethod(cls, selector)) continue;
+        NSString *name = [NSString stringWithUTF8String:class_getName(cls)];
+        [matches addObject:name ?: @"<unknown>"];
+        if (!found && (!nameHint.length || [name containsString:nameHint])) found = cls;
+        if (!found) found = cls;
+    }
+    GCBLog(@"selector %@ matches %@", NSStringFromSelector(selector), [matches componentsJoinedByString:@", "]);
+    free(classes);
+    return found;
+}
+
 static void GCBDumpInterestingClasses(void) {
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
@@ -404,12 +439,25 @@ static void GCBInstallHooks(void) {
         GCBLog(@"DeviceInfoRequest class not found");
     }
 
-    Class fileSender = objc_getClass("GDIFileSender");
-    if (fileSender) {
-        GCBHookInstance(fileSender, @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:), (IMP)GCBGDIFileSenderSendFileToEdge, (IMP *)&origGDIFileSenderSendFileToEdge);
-        GCBLog(@"GDIFileSender sendFileToEdge types=%@", GCBTypeEncodingForSelector(fileSender, @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:)));
+    Class nominalFileSender = objc_getClass("GDIFileSender");
+    if (nominalFileSender) {
+        GCBDumpMethodsForClassName("GDIFileSender");
     } else {
         GCBLog(@"GDIFileSender class not found");
+    }
+
+    SEL sendFileSelector = @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:);
+    Class fileSender = nominalFileSender;
+    if (!fileSender || !class_getInstanceMethod(fileSender, sendFileSelector)) {
+        fileSender = GCBFindClassWithInstanceSelector(sendFileSelector, @"FileSender");
+    }
+    if (fileSender) {
+        GCBLog(@"using file sender class %s", class_getName(fileSender));
+        GCBHookInstance(fileSender, @selector(initWithDelegate:taskManager:), (IMP)GCBGDIFileSenderInitWithDelegate, (IMP *)&origGDIFileSenderInitWithDelegate);
+        GCBHookInstance(fileSender, sendFileSelector, (IMP)GCBGDIFileSenderSendFileToEdge, (IMP *)&origGDIFileSenderSendFileToEdge);
+        GCBLog(@"file sender sendFileToEdge types=%@", GCBTypeEncodingForSelector(fileSender, sendFileSelector));
+    } else {
+        GCBLog(@"No runtime class owns %@", NSStringFromSelector(sendFileSelector));
     }
 
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
