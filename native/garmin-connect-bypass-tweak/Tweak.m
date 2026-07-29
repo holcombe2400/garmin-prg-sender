@@ -20,7 +20,6 @@ static id (*origGDIFileSenderInitWithDelegate)(id, SEL, id, id);
 static id (*origGDIFileSenderInitWithTaskManager)(id, SEL, id);
 static void (*origGDIFileSenderSetTaskManager)(id, SEL, id);
 static signed char (*origGDIFileSenderSendFileToEdge)(id, SEL, id, unsigned char, unsigned char, id, long long);
-static id (*origGDIFileSenderSendRequestProgressCompletion)(id, SEL, id, id, id);
 static id (*origGDIFileSenderSendCreateFileRequestProgressCompletion)(id, SEL, id, id, id);
 static id (*origGDIFileSenderSendUploadRequestProgressCompletion)(id, SEL, id, id, id);
 static id (*origGDIFileSenderSendFileTransferDataRequestProgressCompletion)(id, SEL, id, id, id);
@@ -31,10 +30,8 @@ static void (*origCochraneDidWriteData)(id, SEL, id, id);
 static void (*origCochraneSendSystemEvent)(id, SEL, unsigned char);
 static void (*origDeviceSendRequestCompletion)(id, SEL, id, id);
 static void (*origDeviceSendRequestTimeoutProgressCompletion)(id, SEL, id, double, id, id);
-static void (*origRequestSenderSendRequestProgressCompletion)(id, SEL, id, id, id);
 static id GCBLastFileSender;
 static id GCBLastDevice;
-static id GCBLastRequestSender;
 static UIButton *GCBUploadButton;
 
 static void GCBDumpMethodsForClassName(const char *name);
@@ -457,12 +454,6 @@ static signed char GCBGDIFileSenderSendFileToEdge(id self, SEL _cmd, id file, un
     return origGDIFileSenderSendFileToEdge ? origGDIFileSenderSendFileToEdge(self, _cmd, file, dataType, subType, deviceFilePath, identifier) : 0;
 }
 
-static id GCBGDIFileSenderSendRequestProgressCompletion(id self, SEL _cmd, id request, id progress, id completion) {
-    GCBLastFileSender = self;
-    GCBInspectRequest(request, @"GDIFileSender sendRequest:progress:completion:");
-    return origGDIFileSenderSendRequestProgressCompletion ? origGDIFileSenderSendRequestProgressCompletion(self, _cmd, request, progress, completion) : nil;
-}
-
 static id GCBGDIFileSenderSendCreateFileRequestProgressCompletion(id self, SEL _cmd, id request, id progress, id completion) {
     GCBLastFileSender = self;
     GCBInspectRequest(request, @"GDIFileSender sendCreateFileRequest:progress:completion:");
@@ -499,12 +490,6 @@ static void GCBDeviceSendRequestTimeoutProgressCompletion(id self, SEL _cmd, id 
     GCBLastDevice = self;
     GCBInspectRequest(request, [NSString stringWithFormat:@"Device sendRequest:timeout:progress:completion: timeout=%0.3f", timeout]);
     if (origDeviceSendRequestTimeoutProgressCompletion) origDeviceSendRequestTimeoutProgressCompletion(self, _cmd, request, timeout, progress, completion);
-}
-
-static void GCBRequestSenderSendRequestProgressCompletion(id self, SEL _cmd, id request, id progress, id completion) {
-    GCBLastRequestSender = self;
-    GCBInspectRequest(request, @"GFDIRequestSender sendRequest:progress:completion:");
-    if (origRequestSenderSendRequestProgressCompletion) origRequestSenderSendRequestProgressCompletion(self, _cmd, request, progress, completion);
 }
 
 static void GCBUploadPRGNow(void) {
