@@ -38,6 +38,7 @@ static id GCBLastRequestSender;
 static UIButton *GCBUploadButton;
 
 static void GCBDumpMethodsForClassName(const char *name);
+static IMP GCBOriginalMappedIMPFor(id self, SEL selector);
 
 static NSString *GCBDirPath(void) {
     static NSString *dir;
@@ -480,6 +481,14 @@ static id GCBGDIFileSenderSendFileTransferDataRequestProgressCompletion(id self,
     return origGDIFileSenderSendFileTransferDataRequestProgressCompletion ? origGDIFileSenderSendFileTransferDataRequestProgressCompletion(self, _cmd, request, progress, completion) : nil;
 }
 
+static id GCBMappedSendRequestProgressCompletion(id self, SEL _cmd, id request, id progress, id completion) {
+    NSString *source = [NSString stringWithFormat:@"%@ sendRequest:progress:completion:", GCBClassName(self)];
+    if ([self isKindOfClass:objc_getClass("GDIFileSender")]) GCBLastFileSender = self;
+    GCBInspectRequest(request, source);
+    IMP original = GCBOriginalMappedIMPFor(self, _cmd);
+    return original ? ((id (*)(id, SEL, id, id, id))original)(self, _cmd, request, progress, completion) : nil;
+}
+
 static void GCBDeviceSendRequestCompletion(id self, SEL _cmd, id request, id completion) {
     GCBLastDevice = self;
     GCBInspectRequest(request, @"Device sendRequest:completion:");
@@ -606,6 +615,60 @@ static void GCBHookClass(Class cls, SEL selector, IMP replacement, IMP *original
     GCBLog(@"hooked class %s %@ types=%s", class_getName(meta), NSStringFromSelector(selector), types ?: "?");
 }
 
+static NSString *GCBMappedIMPKey(Class cls, SEL selector) {
+    return [NSString stringWithFormat:@"%s:%s", class_getName(cls), sel_getName(selector)];
+}
+
+static NSMutableDictionary *GCBMappedIMPTable(void) {
+    static NSMutableDictionary *table;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        table = [NSMutableDictionary new];
+    });
+    return table;
+}
+
+static IMP GCBOriginalMappedIMPFor(id self, SEL selector) {
+    if (!self) return NULL;
+    NSString *key = GCBMappedIMPKey([self class], selector);
+    NSValue *value = nil;
+    @synchronized (GCBMappedIMPTable()) {
+        value = GCBMappedIMPTable()[key];
+    }
+    return value ? value.pointerValue : NULL;
+}
+
+static void GCBHookInstanceMapped(Class cls, SEL selector, IMP replacement) {
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!method) return;
+    const char *types = method_getTypeEncoding(method);
+    NSString *key = GCBMappedIMPKey(cls, selector);
+    @synchronized (GCBMappedIMPTable()) {
+        if (GCBMappedIMPTable()[key]) return;
+        IMP original = method_setImplementation(method, replacement);
+        GCBMappedIMPTable()[key] = [NSValue valueWithPointer:original];
+    }
+    GCBLog(@"hooked mapped instance %s %@ types=%s", class_getName(cls), NSStringFromSelector(selector), types ?: "?");
+}
+
+static void GCBHookAllClassesWithInstanceSelector(SEL selector, IMP replacement) {
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
+    NSMutableArray *matches = [NSMutableArray array];
+    for (unsigned int i = 0; i < count; i++) {
+        Class cls = classes[i];
+        Method method = class_getInstanceMethod(cls, selector);
+        if (!method) continue;
+        const char *types = method_getTypeEncoding(method);
+        if (!types || strcmp(types, "@20@0:4@8@?12@?16") != 0) continue;
+        NSString *name = [NSString stringWithUTF8String:class_getName(cls)];
+        [matches addObject:name ?: @"<unknown>"];
+        GCBHookInstanceMapped(cls, selector, replacement);
+    }
+    GCBLog(@"mapped selector %@ owners %@", NSStringFromSelector(selector), [matches componentsJoinedByString:@", "]);
+    free(classes);
+}
+
 static void GCBDumpMethodsForClassName(const char *name) {
     Class cls = objc_getClass(name);
     if (!cls) return;
@@ -690,7 +753,6 @@ static void GCBInstallHooks(void) {
         GCBDumpMethodsForClassName("GDIFileSender");
         GCBHookInstance(nominalFileSender, @selector(initWithTaskManager:), (IMP)GCBGDIFileSenderInitWithTaskManager, (IMP *)&origGDIFileSenderInitWithTaskManager);
         GCBHookInstance(nominalFileSender, @selector(setTaskManager:), (IMP)GCBGDIFileSenderSetTaskManager, (IMP *)&origGDIFileSenderSetTaskManager);
-        GCBHookInstance(nominalFileSender, @selector(sendRequest:progress:completion:), (IMP)GCBGDIFileSenderSendRequestProgressCompletion, (IMP *)&origGDIFileSenderSendRequestProgressCompletion);
         GCBHookInstance(nominalFileSender, @selector(sendCreateFileRequest:progress:completion:), (IMP)GCBGDIFileSenderSendCreateFileRequestProgressCompletion, (IMP *)&origGDIFileSenderSendCreateFileRequestProgressCompletion);
         GCBHookInstance(nominalFileSender, @selector(sendUploadRequest:progress:completion:), (IMP)GCBGDIFileSenderSendUploadRequestProgressCompletion, (IMP *)&origGDIFileSenderSendUploadRequestProgressCompletion);
         GCBHookInstance(nominalFileSender, @selector(sendFileTransferDataRequest:progress:completion:), (IMP)GCBGDIFileSenderSendFileTransferDataRequestProgressCompletion, (IMP *)&origGDIFileSenderSendFileTransferDataRequestProgressCompletion);
@@ -728,13 +790,12 @@ static void GCBInstallHooks(void) {
     }
 
     SEL requestSenderSelector = @selector(sendRequest:progress:completion:);
+    GCBHookAllClassesWithInstanceSelector(requestSenderSelector, (IMP)GCBMappedSendRequestProgressCompletion);
     Class requestSender = objc_getClass("_TtC14GarminDeviceIO17GFDIRequestSender");
-    if (requestSender && class_getInstanceMethod(requestSender, requestSenderSelector)) {
+    if (requestSender) {
         GCBDumpMethodsForClassName(class_getName(requestSender));
-        GCBHookInstance(requestSender, requestSenderSelector, (IMP)GCBRequestSenderSendRequestProgressCompletion, (IMP *)&origRequestSenderSendRequestProgressCompletion);
-    } else {
-        GCBLog(@"GFDIRequestSender %@ not hookable", requestSender ? @"found but selector missing" : @"class not found");
     }
+    GCBLog(@"GFDIRequestSender %@ not hookable", (requestSender && class_getInstanceMethod(requestSender, requestSenderSelector)) ? @"mapped" : (requestSender ? @"found but selector missing" : @"class not found"));
 
     GCBDumpMethodsForClassName("_TtC22GarminDeviceIOMessages17CreateFileRequest");
     GCBDumpMethodsForClassName("_TtC22GarminDeviceIOMessages13UploadRequest");
