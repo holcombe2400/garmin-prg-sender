@@ -14,6 +14,7 @@ typedef NS_ENUM(uint16_t, GNGarminMessage) {
 typedef NS_ENUM(uint8_t, GNSystemEvent) {
     GNSystemEventSyncComplete = 0,
     GNSystemEventSyncReady = 8,
+    GNSystemEventDeviceDisconnect = 11,
 };
 
 uint16_t GNGarminCRC(NSData *data, uint16_t initialCRC);

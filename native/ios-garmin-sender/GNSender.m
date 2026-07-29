@@ -708,10 +708,13 @@ static NSString *GNLocalHex(NSData *data) {
     [self log:@"Sending SYNC_COMPLETE."];
     [self sendGfdi:GNBuildSystemEvent(GNSystemEventSyncComplete, 0) label:@"SYNC_COMPLETE"];
     [self waitForOriginal:GNGarminMessageSystemEvent timeout:GNGfdiTimeout];
+    [self log:@"Sending DEVICE_DISCONNECT registration trigger."];
+    [self sendGfdi:GNBuildSystemEvent(GNSystemEventDeviceDisconnect, 0) label:@"DEVICE_DISCONNECT"];
+    [self waitForOriginal:GNGarminMessageSystemEvent timeout:5.0];
     NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceDate:self.uploadStartedAt];
     double kbps = elapsed > 0 ? (double)data.length / 1024.0 / elapsed : 0;
     [self log:[NSString stringWithFormat:@"Upload complete. %.1f KB/s average over %.0fs.", kbps, elapsed]];
-    [self updateStatus:@"Upload complete. Let Garmin Connect register it."];
+    [self updateStatus:@"Upload complete. Watch should disconnect/index if trigger worked."];
 }
 
 - (NSDictionary *)waitForKind:(NSString *)kind timeout:(NSTimeInterval)timeout {
