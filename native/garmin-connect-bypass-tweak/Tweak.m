@@ -26,6 +26,9 @@ static id (*origGarminDeviceSendRequestProgressCompletion)(id, SEL, id, id, id);
 static id (*origSwiftFileReceiverInitWithDevice)(id, SEL, id);
 static id (*origSwiftFileSenderInitWithDevice)(id, SEL, id);
 static void (*origSwiftFileSenderSendFile)(id, SEL, id, unsigned int, unsigned char, id, unsigned long long, id, id);
+static void (*origCreateFileRequestSetFileDataType)(id, SEL, unsigned char);
+static void (*origCreateFileRequestSetFileDataSubTypes)(id, SEL, unsigned char);
+static void (*origCreateFileRequestSetFilePath)(id, SEL, id);
 static id (*origCochraneInit)(id, SEL);
 static void (*origCochraneRetrieveDeviceData)(id, SEL);
 static void (*origCochraneDidReceiveData)(id, SEL, id, id);
@@ -41,10 +44,12 @@ static unsigned int GCBLastSwiftFileSenderType;
 static unsigned char GCBLastSwiftFileSenderSubtype;
 static unsigned long long GCBLastSwiftFileSenderIdentifier;
 static BOOL GCBHasLastSwiftFileSenderType;
+static BOOL GCBActivePRGCreateOverride;
 static BOOL GCBGarminDeviceHookInstalled;
 static BOOL GCBSwiftFileReceiverHookInstalled;
 static BOOL GCBSwiftFileSenderHookInstalled;
 static BOOL GCBSwiftFileSenderSendHookInstalled;
+static BOOL GCBCreateFileRequestHooksInstalled;
 static UIButton *GCBUploadButton;
 
 static NSString *GCBDirPath(void) {
@@ -171,6 +176,10 @@ static NSString *GCBPRGDevicePath(void) {
     return @"GARMIN/APPS/MEDIA\\CODX0001.PRG";
 }
 
+static BOOL GCBRawPRGStageMode(void) {
+    return GCBFileExists(@"raw_prg_stage_mode");
+}
+
 static void GCBShowAlert(NSString *title, NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *root = [UIApplication sharedApplication].keyWindow.rootViewController;
@@ -291,6 +300,36 @@ static id GCBAlertController(id self, SEL _cmd, NSString *title, NSString *messa
         GCBLog(@"UIAlertController title=%@ message=%@ style=%ld stack=%@", title, message, (long)style, GCBStack());
     }
     return origAlertController ? origAlertController(self, _cmd, title, message, style) : nil;
+}
+
+static void GCBCreateFileRequestSetFileDataType(id self, SEL _cmd, unsigned char fileDataType) {
+    unsigned char value = (GCBActivePRGCreateOverride && GCBRawPRGStageMode()) ? GCBPRGType : fileDataType;
+    if (value != fileDataType) {
+        GCBLog(@"CreateFileRequest.fileDataType override %u -> %u self=%p", fileDataType, value, self);
+    } else if (GCBActivePRGCreateOverride || GCBVerboseRuntime()) {
+        GCBLog(@"CreateFileRequest.fileDataType set %u self=%p", fileDataType, self);
+    }
+    if (origCreateFileRequestSetFileDataType) origCreateFileRequestSetFileDataType(self, _cmd, value);
+}
+
+static void GCBCreateFileRequestSetFileDataSubTypes(id self, SEL _cmd, unsigned char fileDataSubTypes) {
+    unsigned char value = (GCBActivePRGCreateOverride && GCBRawPRGStageMode()) ? GCBPRGSubtype : fileDataSubTypes;
+    if (value != fileDataSubTypes) {
+        GCBLog(@"CreateFileRequest.fileDataSubTypes override %u -> %u self=%p", fileDataSubTypes, value, self);
+    } else if (GCBActivePRGCreateOverride || GCBVerboseRuntime()) {
+        GCBLog(@"CreateFileRequest.fileDataSubTypes set %u self=%p", fileDataSubTypes, self);
+    }
+    if (origCreateFileRequestSetFileDataSubTypes) origCreateFileRequestSetFileDataSubTypes(self, _cmd, value);
+}
+
+static void GCBCreateFileRequestSetFilePath(id self, SEL _cmd, id filePath) {
+    id value = (GCBActivePRGCreateOverride && GCBRawPRGStageMode()) ? nil : filePath;
+    if (filePath && !value) {
+        GCBLog(@"CreateFileRequest.filePath override %@ -> nil self=%p", filePath, self);
+    } else if (GCBActivePRGCreateOverride || GCBVerboseRuntime()) {
+        GCBLog(@"CreateFileRequest.filePath set %@ self=%p", filePath, self);
+    }
+    if (origCreateFileRequestSetFilePath) origCreateFileRequestSetFilePath(self, _cmd, value);
 }
 
 static id GCBGDIFileSenderInitWithDelegate(id self, SEL _cmd, id delegate, id taskManager) {
@@ -475,6 +514,7 @@ static BOOL GCBUploadPRGViaSwiftFileSender(NSString *path, NSData *prgData, NSUI
 
     unsigned long long identifier = (((unsigned long long)[[NSDate date] timeIntervalSince1970]) << 16) | (unsigned long long)(arc4random() & 0xffff);
     GCBActiveSwiftFileSender = sender;
+    GCBActivePRGCreateOverride = GCBRawPRGStageMode();
     GCBActiveSwiftProgressBlock = [^(NSInteger sent, NSInteger total) {
         GCBLog(@"Swift FileSender PRG progress %ld/%ld", (long)sent, (long)total);
     } copy];
@@ -488,11 +528,12 @@ static BOOL GCBUploadPRGViaSwiftFileSender(NSString *path, NSData *prgData, NSUI
         GCBActiveSwiftFileSender = nil;
         GCBActiveSwiftProgressBlock = nil;
         GCBActiveSwiftCompletionBlock = nil;
+        GCBActivePRGCreateOverride = NO;
     } copy];
 
-    NSString *devicePath = GCBPRGDevicePath();
-    GCBLog(@"Upload PRG invoking Swift FileSender sender=%p device=%p path=%@ devicePath=%@ size=%lu fileTypeArg=%u subtype=%u source=%@ lastObservedType=%u lastObservedSubtype=%u lastObservedIdentifier=%llu identifier=%llu sendTypes=%@",
-           sender, device, path, devicePath, (unsigned long)size, swiftFileType, swiftFileSubType, typeSource,
+    NSString *devicePath = GCBRawPRGStageMode() ? nil : GCBPRGDevicePath();
+    GCBLog(@"Upload PRG invoking Swift FileSender sender=%p device=%p path=%@ devicePath=%@ rawStage=%d size=%lu fileTypeArg=%u subtype=%u source=%@ lastObservedType=%u lastObservedSubtype=%u lastObservedIdentifier=%llu identifier=%llu sendTypes=%@",
+           sender, device, path, devicePath ?: @"<nil>", GCBRawPRGStageMode(), (unsigned long)size, swiftFileType, swiftFileSubType, typeSource,
            GCBLastSwiftFileSenderType, GCBLastSwiftFileSenderSubtype, GCBLastSwiftFileSenderIdentifier,
            identifier, GCBTypeEncodingForSelector(fileSenderClass, sendSelector));
     ((void (*)(id, SEL, id, unsigned int, unsigned char, id, unsigned long long, id, id))objc_msgSend)(
@@ -705,10 +746,44 @@ static void GCBInstallSwiftFileDeviceHooks(void) {
     }
 }
 
+static void GCBInstallCreateFileRequestHooks(void) {
+    if (GCBCreateFileRequestHooksInstalled) return;
+    Class cls = objc_getClass("_TtC22GarminDeviceIOMessages17CreateFileRequest");
+    if (!cls) {
+        GCBLog(@"CreateFileRequest class not found");
+        return;
+    }
+
+    SEL setType = @selector(setFileDataType:);
+    SEL setSubType = @selector(setFileDataSubTypes:);
+    SEL setPath = @selector(setFilePath:);
+    GCBLog(@"CreateFileRequest hook candidates class=%@ setType=%@ setSubType=%@ setPath=%@",
+           NSStringFromClass(cls),
+           GCBTypeEncodingForSelector(cls, setType),
+           GCBTypeEncodingForSelector(cls, setSubType),
+           GCBTypeEncodingForSelector(cls, setPath));
+
+    BOOL hooked = NO;
+    if (class_getInstanceMethod(cls, setType)) {
+        GCBHookInstance(cls, setType, (IMP)GCBCreateFileRequestSetFileDataType, (IMP *)&origCreateFileRequestSetFileDataType);
+        hooked = YES;
+    }
+    if (class_getInstanceMethod(cls, setSubType)) {
+        GCBHookInstance(cls, setSubType, (IMP)GCBCreateFileRequestSetFileDataSubTypes, (IMP *)&origCreateFileRequestSetFileDataSubTypes);
+        hooked = YES;
+    }
+    if (class_getInstanceMethod(cls, setPath)) {
+        GCBHookInstance(cls, setPath, (IMP)GCBCreateFileRequestSetFilePath, (IMP *)&origCreateFileRequestSetFilePath);
+        hooked = YES;
+    }
+    GCBCreateFileRequestHooksInstalled = hooked;
+}
+
 static void GCBScheduleGarminDeviceHookAttempt(NSTimeInterval delay) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         GCBInstallGarminDeviceHook();
         GCBInstallSwiftFileDeviceHooks();
+        GCBInstallCreateFileRequestHooks();
     });
 }
 
