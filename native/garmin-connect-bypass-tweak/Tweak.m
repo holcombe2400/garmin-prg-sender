@@ -20,12 +20,17 @@ static id (*origGDIFileSenderInitWithDelegate)(id, SEL, id, id);
 static id (*origGDIFileSenderInitWithTaskManager)(id, SEL, id);
 static void (*origGDIFileSenderSetTaskManager)(id, SEL, id);
 static signed char (*origGDIFileSenderSendFileToEdge)(id, SEL, id, unsigned char, unsigned char, id, long long);
+static id (*origGarminDeviceSendRequestProgressCompletion)(id, SEL, id, id, id);
 static id (*origCochraneInit)(id, SEL);
 static void (*origCochraneRetrieveDeviceData)(id, SEL);
 static void (*origCochraneDidReceiveData)(id, SEL, id, id);
 static void (*origCochraneDidWriteData)(id, SEL, id, id);
 static void (*origCochraneSendSystemEvent)(id, SEL, unsigned char);
 static id GCBLastFileSender;
+static id GCBLastGarminDevice;
+static id GCBActiveSwiftFileSender;
+static id GCBActiveSwiftProgressBlock;
+static id GCBActiveSwiftCompletionBlock;
 static UIButton *GCBUploadButton;
 
 static NSString *GCBDirPath(void) {
@@ -318,6 +323,68 @@ static signed char GCBGDIFileSenderSendFileToEdge(id self, SEL _cmd, id file, un
     return origGDIFileSenderSendFileToEdge ? origGDIFileSenderSendFileToEdge(self, _cmd, file, dataType, subType, deviceFilePath, identifier) : 0;
 }
 
+static id GCBGarminDeviceSendRequestProgressCompletion(id self, SEL _cmd, id request, id progress, id completion) {
+    if (self) {
+        GCBLastGarminDevice = self;
+        GCBLog(@"Captured GarminDevice via %@ self=%p class=%@ requestClass=%@",
+               NSStringFromSelector(_cmd), self, NSStringFromClass([self class]),
+               request ? NSStringFromClass([request class]) : @"<nil>");
+    }
+    return origGarminDeviceSendRequestProgressCompletion ? origGarminDeviceSendRequestProgressCompletion(self, _cmd, request, progress, completion) : nil;
+}
+
+static BOOL GCBUploadPRGViaSwiftFileSender(NSString *path, NSData *prgData, NSUInteger size) {
+    id device = GCBLastGarminDevice;
+    if (!device) {
+        GCBLog(@"Swift FileSender upload unavailable: no GarminDevice captured yet");
+        return NO;
+    }
+
+    Class fileSenderClass = objc_getClass("_TtC16GarminDeviceSync10FileSender");
+    SEL initSelector = @selector(initWithDevice:);
+    SEL sendSelector = NSSelectorFromString(@"sendFile:fileType:fileSubType:filePathOnDevice:fileIdentifier:progress:completion:");
+    if (!fileSenderClass || !class_getInstanceMethod(fileSenderClass, initSelector) || !class_getInstanceMethod(fileSenderClass, sendSelector)) {
+        GCBLog(@"Swift FileSender upload unavailable: class=%@ initTypes=%@ sendTypes=%@",
+               fileSenderClass ? NSStringFromClass(fileSenderClass) : @"<nil>",
+               fileSenderClass ? GCBTypeEncodingForSelector(fileSenderClass, initSelector) : @"<nil>",
+               fileSenderClass ? GCBTypeEncodingForSelector(fileSenderClass, sendSelector) : @"<nil>");
+        return NO;
+    }
+
+    id allocated = ((id (*)(id, SEL))objc_msgSend)(fileSenderClass, @selector(alloc));
+    id sender = ((id (*)(id, SEL, id))objc_msgSend)(allocated, initSelector, device);
+    if (!sender) {
+        GCBLog(@"Swift FileSender initWithDevice returned nil for device=%p class=%@", device, NSStringFromClass([device class]));
+        return NO;
+    }
+
+    unsigned long long identifier = (((unsigned long long)[[NSDate date] timeIntervalSince1970]) << 16) | (unsigned long long)(arc4random() & 0xffff);
+    GCBActiveSwiftFileSender = sender;
+    GCBActiveSwiftProgressBlock = [^(NSInteger sent, NSInteger total) {
+        GCBLog(@"Swift FileSender PRG progress %ld/%ld", (long)sent, (long)total);
+    } copy];
+    GCBActiveSwiftCompletionBlock = [^(double duration, NSInteger bytes, NSError *error) {
+        GCBLog(@"Swift FileSender PRG completion duration=%f bytes=%ld error=%@",
+               duration, (long)bytes, error);
+        NSString *message = error
+            ? [NSString stringWithFormat:@"Finished with error:\n%@", error.localizedDescription ?: error.description]
+            : [NSString stringWithFormat:@"Sent %ld bytes via Garmin Connect.", (long)bytes];
+        GCBShowAlert(@"Upload PRG", message);
+        GCBActiveSwiftFileSender = nil;
+        GCBActiveSwiftProgressBlock = nil;
+        GCBActiveSwiftCompletionBlock = nil;
+    } copy];
+
+    GCBLog(@"Upload PRG invoking Swift FileSender sender=%p device=%p path=%@ size=%lu type=%u subtype=%u identifier=%llu sendTypes=%@",
+           sender, device, path, (unsigned long)size, GCBPRGType, GCBPRGSubtype, identifier,
+           GCBTypeEncodingForSelector(fileSenderClass, sendSelector));
+    ((void (*)(id, SEL, id, unsigned int, unsigned char, id, unsigned long long, id, id))objc_msgSend)(
+        sender, sendSelector, prgData, (unsigned int)GCBPRGType, (unsigned char)GCBPRGSubtype,
+        nil, identifier, GCBActiveSwiftProgressBlock, GCBActiveSwiftCompletionBlock);
+    GCBShowAlert(@"Upload PRG", [NSString stringWithFormat:@"Started via Garmin Connect Swift sender.\n%lu bytes", (unsigned long)size]);
+    return YES;
+}
+
 static void GCBUploadPRGNow(void) {
     NSString *path = GCBPRGPath();
     NSUInteger size = 0;
@@ -326,11 +393,20 @@ static void GCBUploadPRGNow(void) {
         GCBShowAlert(@"Upload PRG", [NSString stringWithFormat:@"Put a valid .prg at:\n%@", path]);
         return;
     }
+    NSData *prgData = [NSData dataWithContentsOfFile:path options:0 error:nil];
+    if (!prgData.length) {
+        GCBLog(@"Upload PRG could not read %@", path);
+        GCBShowAlert(@"Upload PRG", @"Could not read the PRG file.");
+        return;
+    }
+
+    if (GCBUploadPRGViaSwiftFileSender(path, prgData, size)) return;
+
     id sender = GCBLastFileSender;
     SEL selector = @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:);
     if (!sender || ![sender respondsToSelector:selector]) {
         GCBLog(@"Upload PRG requested but no live GDIFileSender is captured yet. path=%@ size=%lu", path, (unsigned long)size);
-        GCBShowAlert(@"Upload PRG", @"Garmin Connect has not exposed its file sender yet. Start a sync once, then tap Upload PRG again.");
+        GCBShowAlert(@"Upload PRG", @"Garmin Connect has not exposed its sender yet. Run one sync, then tap Upload PRG again.");
         return;
     }
 
@@ -338,12 +414,6 @@ static void GCBUploadPRGNow(void) {
     if (!signature || signature.numberOfArguments < 7) {
         GCBLog(@"Upload PRG cannot invoke sendFileToEdge signature=%@ argCount=%lu", signature, (unsigned long)signature.numberOfArguments);
         GCBShowAlert(@"Upload PRG", @"Garmin file sender signature was not usable. I logged the details.");
-        return;
-    }
-    NSData *prgData = [NSData dataWithContentsOfFile:path options:0 error:nil];
-    if (!prgData.length) {
-        GCBLog(@"Upload PRG could not read %@", path);
-        GCBShowAlert(@"Upload PRG", @"Could not read the PRG file.");
         return;
     }
 
@@ -445,18 +515,22 @@ static Class GCBFindClassWithInstanceSelector(SEL selector, NSString *nameHint) 
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
     Class found = Nil;
+    Class fallback = Nil;
     NSMutableArray *matches = [NSMutableArray array];
     for (unsigned int i = 0; i < count; i++) {
         Class cls = classes[i];
         if (!class_getInstanceMethod(cls, selector)) continue;
         NSString *name = [NSString stringWithUTF8String:class_getName(cls)];
         [matches addObject:name ?: @"<unknown>"];
-        if (!found && (!nameHint.length || [name containsString:nameHint])) found = cls;
-        if (!found) found = cls;
+        if (!fallback) fallback = cls;
+        if (!nameHint.length || [name containsString:nameHint]) {
+            found = cls;
+            break;
+        }
     }
     GCBLog(@"selector %@ matches %@", NSStringFromSelector(selector), [matches componentsJoinedByString:@", "]);
     free(classes);
-    return found;
+    return found ?: fallback;
 }
 
 static void GCBDumpInterestingClasses(void) {
@@ -535,6 +609,19 @@ static void GCBInstallHooks(void) {
     GCBDumpMethodsForClassName("_TtC16GarminDeviceSync14FileSenderTask");
     GCBFindClassWithInstanceSelector(NSSelectorFromString(@"sendFile:fileType:fileSubType:filePathOnDevice:fileIdentifier:progress:completion:"), @"FileSender");
     GCBFindClassWithInstanceSelector(NSSelectorFromString(@"initWithDevice:"), @"FileSender");
+
+    SEL garminDeviceRequestSelector = @selector(sendRequest:progress:completion:);
+    Class garminDeviceClass = objc_getClass("_TtC16GarminDeviceSync0aB0C");
+    if (!garminDeviceClass || !class_getInstanceMethod(garminDeviceClass, garminDeviceRequestSelector)) {
+        garminDeviceClass = GCBFindClassWithInstanceSelector(garminDeviceRequestSelector, @"GarminDeviceSync.GarminDevice");
+    }
+    NSString *garminDeviceClassName = garminDeviceClass ? NSStringFromClass(garminDeviceClass) : @"<nil>";
+    if (garminDeviceClass && ([garminDeviceClassName containsString:@"GarminDeviceSync.GarminDevice"] || [garminDeviceClassName containsString:@"_TtC16GarminDeviceSync0aB0C"])) {
+        GCBLog(@"using GarminDevice class %@ requestTypes=%@", garminDeviceClassName, GCBTypeEncodingForSelector(garminDeviceClass, garminDeviceRequestSelector));
+        GCBHookInstance(garminDeviceClass, garminDeviceRequestSelector, (IMP)GCBGarminDeviceSendRequestProgressCompletion, (IMP *)&origGarminDeviceSendRequestProgressCompletion);
+    } else {
+        GCBLog(@"GarminDeviceSync.GarminDevice sender class not found; got %@", garminDeviceClassName);
+    }
 
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
         GCBInstallUploadButton();
