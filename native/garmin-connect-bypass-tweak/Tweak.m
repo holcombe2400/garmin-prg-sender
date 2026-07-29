@@ -56,6 +56,7 @@ static BOOL GCBSwiftFileReceiverHookInstalled;
 static BOOL GCBSwiftFileSenderHookInstalled;
 static BOOL GCBSwiftFileSenderSendHookInstalled;
 static BOOL GCBCreateFileRequestHooksInstalled;
+static BOOL GCBGDIFileSenderDetailHooksInstalled;
 static UIButton *GCBUploadButton;
 
 static NSString *GCBDirPath(void) {
@@ -94,6 +95,7 @@ static NSString *GCBReadTrimmedControlFile(NSString *name);
 static void GCBDumpMethodsForClassName(const char *name);
 static void GCBApplyRawPRGCreateRequestOverride(id request);
 static void GCBDumpCreateFileRequest(id request, NSString *source);
+static void GCBInstallGDIFileSenderDetailHooks(void);
 
 static BOOL GCBReadUnsignedControlFile(NSString *name, unsigned long long *valueOut) {
     NSString *value = GCBReadTrimmedControlFile(name);
@@ -187,6 +189,10 @@ static NSString *GCBPRGDevicePath(void) {
 
 static BOOL GCBRawPRGStageMode(void) {
     return GCBFileExists(@"raw_prg_stage_mode");
+}
+
+static BOOL GCBGDIFileSenderExperimentMode(void) {
+    return GCBFileExists(@"gdi_file_sender_hooks");
 }
 
 static void GCBShowAlert(NSString *title, NSString *message) {
@@ -696,6 +702,9 @@ static BOOL GCBUploadPRGViaSwiftFileSender(NSString *path, NSData *prgData, NSUI
         GCBLog(@"Swift FileSender initWithDevice returned nil for device=%p class=%@", device, NSStringFromClass([device class]));
         return NO;
     }
+    if (GCBRawPRGStageMode() && GCBGDIFileSenderExperimentMode()) {
+        GCBInstallGDIFileSenderDetailHooks();
+    }
 
     unsigned long long identifier = (((unsigned long long)[[NSDate date] timeIntervalSince1970]) << 16) | (unsigned long long)(arc4random() & 0xffff);
     GCBActiveSwiftFileSender = sender;
@@ -964,11 +973,30 @@ static void GCBInstallCreateFileRequestHooks(void) {
     GCBCreateFileRequestHooksInstalled = hooked;
 }
 
+static void GCBInstallGDIFileSenderDetailHooks(void) {
+    if (GCBGDIFileSenderDetailHooksInstalled) return;
+    Class nominalFileSender = objc_getClass("GDIFileSender");
+    if (!nominalFileSender) {
+        GCBLog(@"GDIFileSender detail hooks unavailable: class not found");
+        return;
+    }
+
+    GCBHookInstance(nominalFileSender, @selector(setFileDataType:), (IMP)GCBGDIFileSenderSetFileDataType, (IMP *)&origGDIFileSenderSetFileDataType);
+    GCBHookInstance(nominalFileSender, @selector(setFileDataSubType:), (IMP)GCBGDIFileSenderSetFileDataSubType, (IMP *)&origGDIFileSenderSetFileDataSubType);
+    GCBHookInstance(nominalFileSender, @selector(setFilePath:), (IMP)GCBGDIFileSenderSetFilePath, (IMP *)&origGDIFileSenderSetFilePath);
+    GCBHookInstance(nominalFileSender, @selector(sendCreateFileRequest:progress:completion:), (IMP)GCBGDIFileSenderSendCreateFileRequest, (IMP *)&origGDIFileSenderSendCreateFileRequest);
+    GCBHookInstance(nominalFileSender, @selector(sendUploadRequest:progress:completion:), (IMP)GCBGDIFileSenderSendUploadRequest, (IMP *)&origGDIFileSenderSendUploadRequest);
+    GCBHookInstance(nominalFileSender, @selector(sendFileTransferDataRequest:progress:completion:), (IMP)GCBGDIFileSenderSendFileTransferDataRequest, (IMP *)&origGDIFileSenderSendFileTransferDataRequest);
+    GCBGDIFileSenderDetailHooksInstalled = YES;
+    GCBLog(@"GDIFileSender detail hooks installed");
+}
+
 static void GCBScheduleGarminDeviceHookAttempt(NSTimeInterval delay) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         GCBInstallGarminDeviceHook();
         GCBInstallSwiftFileDeviceHooks();
         GCBInstallCreateFileRequestHooks();
+        if (GCBGDIFileSenderExperimentMode()) GCBInstallGDIFileSenderDetailHooks();
     });
 }
 
@@ -1019,12 +1047,7 @@ static void GCBInstallHooks(void) {
         if (GCBVerboseRuntime()) GCBDumpMethodsForClassName("GDIFileSender");
         GCBHookInstance(nominalFileSender, @selector(initWithTaskManager:), (IMP)GCBGDIFileSenderInitWithTaskManager, (IMP *)&origGDIFileSenderInitWithTaskManager);
         GCBHookInstance(nominalFileSender, @selector(setTaskManager:), (IMP)GCBGDIFileSenderSetTaskManager, (IMP *)&origGDIFileSenderSetTaskManager);
-        GCBHookInstance(nominalFileSender, @selector(setFileDataType:), (IMP)GCBGDIFileSenderSetFileDataType, (IMP *)&origGDIFileSenderSetFileDataType);
-        GCBHookInstance(nominalFileSender, @selector(setFileDataSubType:), (IMP)GCBGDIFileSenderSetFileDataSubType, (IMP *)&origGDIFileSenderSetFileDataSubType);
-        GCBHookInstance(nominalFileSender, @selector(setFilePath:), (IMP)GCBGDIFileSenderSetFilePath, (IMP *)&origGDIFileSenderSetFilePath);
-        GCBHookInstance(nominalFileSender, @selector(sendCreateFileRequest:progress:completion:), (IMP)GCBGDIFileSenderSendCreateFileRequest, (IMP *)&origGDIFileSenderSendCreateFileRequest);
-        GCBHookInstance(nominalFileSender, @selector(sendUploadRequest:progress:completion:), (IMP)GCBGDIFileSenderSendUploadRequest, (IMP *)&origGDIFileSenderSendUploadRequest);
-        GCBHookInstance(nominalFileSender, @selector(sendFileTransferDataRequest:progress:completion:), (IMP)GCBGDIFileSenderSendFileTransferDataRequest, (IMP *)&origGDIFileSenderSendFileTransferDataRequest);
+        if (GCBGDIFileSenderExperimentMode()) GCBInstallGDIFileSenderDetailHooks();
     } else {
         GCBLog(@"GDIFileSender class not found");
     }
