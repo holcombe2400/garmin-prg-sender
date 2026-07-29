@@ -17,7 +17,9 @@ static void (*origCancelPeripheralConnection)(id, SEL, id);
 static NSString *(*origLocalizedString)(id, SEL, NSString *, NSString *, NSString *);
 static id (*origAlertController)(id, SEL, NSString *, NSString *, NSInteger);
 static id (*origGDIFileSenderInitWithDelegate)(id, SEL, id, id);
-static void (*origGDIFileSenderSendFileToEdge)(id, SEL, id, NSUInteger, NSUInteger, id, NSUInteger);
+static id (*origGDIFileSenderInitWithTaskManager)(id, SEL, id);
+static void (*origGDIFileSenderSetTaskManager)(id, SEL, id);
+static signed char (*origGDIFileSenderSendFileToEdge)(id, SEL, id, unsigned char, unsigned char, id, long long);
 static id GCBLastFileSender;
 static UIButton *GCBUploadButton;
 
@@ -248,12 +250,35 @@ static id GCBGDIFileSenderInitWithDelegate(id self, SEL _cmd, id delegate, id ta
     return value;
 }
 
-static void GCBGDIFileSenderSendFileToEdge(id self, SEL _cmd, id file, NSUInteger dataType, NSUInteger subType, id deviceFilePath, NSUInteger identifier) {
+static id GCBGDIFileSenderInitWithTaskManager(id self, SEL _cmd, id taskManager) {
+    id value = origGDIFileSenderInitWithTaskManager ? origGDIFileSenderInitWithTaskManager(self, _cmd, taskManager) : self;
+    SEL sendFileSelector = @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:);
+    id captured = taskManager;
+    if (!captured && [value respondsToSelector:@selector(taskManager)]) captured = [value performSelector:@selector(taskManager)];
+    if ([captured respondsToSelector:sendFileSelector]) {
+        GCBLastFileSender = captured;
+        GCBLog(@"GDIFileSender initWithTaskManager captured taskManager=%p class=%@", captured, NSStringFromClass([captured class]));
+    } else {
+        GCBLog(@"GDIFileSender initWithTaskManager saw non-sender taskManager=%p class=%@", captured, captured ? NSStringFromClass([captured class]) : @"<nil>");
+    }
+    return value;
+}
+
+static void GCBGDIFileSenderSetTaskManager(id self, SEL _cmd, id taskManager) {
+    SEL sendFileSelector = @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:);
+    if ([taskManager respondsToSelector:sendFileSelector]) {
+        GCBLastFileSender = taskManager;
+        GCBLog(@"GDIFileSender setTaskManager captured taskManager=%p class=%@", taskManager, NSStringFromClass([taskManager class]));
+    }
+    if (origGDIFileSenderSetTaskManager) origGDIFileSenderSetTaskManager(self, _cmd, taskManager);
+}
+
+static signed char GCBGDIFileSenderSendFileToEdge(id self, SEL _cmd, id file, unsigned char dataType, unsigned char subType, id deviceFilePath, long long identifier) {
     GCBLastFileSender = self;
-    GCBLog(@"GDIFileSender sendFileToEdge self=%p file=%p fileClass=%@ dataType=%lu subType=%lu deviceFilePathClass=%@ identifier=%lu stack=%@",
-           self, file, file ? NSStringFromClass([file class]) : @"<nil>", (unsigned long)dataType, (unsigned long)subType,
-           deviceFilePath ? NSStringFromClass([deviceFilePath class]) : @"<nil>", (unsigned long)identifier, GCBStack());
-    if (origGDIFileSenderSendFileToEdge) origGDIFileSenderSendFileToEdge(self, _cmd, file, dataType, subType, deviceFilePath, identifier);
+    GCBLog(@"GDICochraneTaskManager sendFileToEdge self=%p file=%p fileClass=%@ dataType=%u subType=%u deviceFilePathClass=%@ identifier=%lld stack=%@",
+           self, file, file ? NSStringFromClass([file class]) : @"<nil>", dataType, subType,
+           deviceFilePath ? NSStringFromClass([deviceFilePath class]) : @"<nil>", identifier, GCBStack());
+    return origGDIFileSenderSendFileToEdge ? origGDIFileSenderSendFileToEdge(self, _cmd, file, dataType, subType, deviceFilePath, identifier) : 0;
 }
 
 static void GCBUploadPRGNow(void) {
@@ -285,7 +310,7 @@ static void GCBUploadPRGNow(void) {
         return;
     }
 
-    NSUInteger identifier = (((NSUInteger)[[NSDate date] timeIntervalSince1970]) ^ (NSUInteger)arc4random());
+    long long identifier = (((long long)[[NSDate date] timeIntervalSince1970]) << 16) | (long long)(arc4random() & 0xffff);
     id nilPath = nil;
     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:signature];
     inv.target = sender;
@@ -297,8 +322,8 @@ static void GCBUploadPRGNow(void) {
     GCBSetInvocationArg(inv, 6, [signature getArgumentTypeAtIndex:6], nil, identifier);
     [inv retainArguments];
 
-    GCBLog(@"Upload PRG invoking sender=%p path=%@ size=%lu type=%u subtype=%u identifier=%lu signature=%@",
-           sender, path, (unsigned long)size, GCBPRGType, GCBPRGSubtype, (unsigned long)identifier, signature);
+    GCBLog(@"Upload PRG invoking sender=%p path=%@ size=%lu type=%u subtype=%u identifier=%lld signature=%@",
+           sender, path, (unsigned long)size, GCBPRGType, GCBPRGSubtype, identifier, signature);
     [inv invoke];
     GCBShowAlert(@"Upload PRG", [NSString stringWithFormat:@"Started via Garmin Connect sender.\n%lu bytes", (unsigned long)size]);
 }
@@ -442,6 +467,8 @@ static void GCBInstallHooks(void) {
     Class nominalFileSender = objc_getClass("GDIFileSender");
     if (nominalFileSender) {
         GCBDumpMethodsForClassName("GDIFileSender");
+        GCBHookInstance(nominalFileSender, @selector(initWithTaskManager:), (IMP)GCBGDIFileSenderInitWithTaskManager, (IMP *)&origGDIFileSenderInitWithTaskManager);
+        GCBHookInstance(nominalFileSender, @selector(setTaskManager:), (IMP)GCBGDIFileSenderSetTaskManager, (IMP *)&origGDIFileSenderSetTaskManager);
     } else {
         GCBLog(@"GDIFileSender class not found");
     }
@@ -453,6 +480,7 @@ static void GCBInstallHooks(void) {
     }
     if (fileSender) {
         GCBLog(@"using file sender class %s", class_getName(fileSender));
+        GCBDumpMethodsForClassName(class_getName(fileSender));
         GCBHookInstance(fileSender, @selector(initWithDelegate:taskManager:), (IMP)GCBGDIFileSenderInitWithDelegate, (IMP *)&origGDIFileSenderInitWithDelegate);
         GCBHookInstance(fileSender, sendFileSelector, (IMP)GCBGDIFileSenderSendFileToEdge, (IMP *)&origGDIFileSenderSendFileToEdge);
         GCBLog(@"file sender sendFileToEdge types=%@", GCBTypeEncodingForSelector(fileSender, sendFileSelector));
