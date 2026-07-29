@@ -14,6 +14,9 @@ static void (*origCancelPeripheralConnection)(id, SEL, id);
 static NSString *(*origLocalizedString)(id, SEL, NSString *, NSString *, NSString *);
 static id (*origAlertController)(id, SEL, NSString *, NSString *, NSInteger);
 
+#ifdef memset
+#undef memset
+#endif
 void *memset(void *ptr, int value, unsigned long count) {
     unsigned char *p = (unsigned char *)ptr;
     while (count--) *p++ = (unsigned char)value;
