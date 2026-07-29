@@ -20,6 +20,11 @@ static id (*origGDIFileSenderInitWithDelegate)(id, SEL, id, id);
 static id (*origGDIFileSenderInitWithTaskManager)(id, SEL, id);
 static void (*origGDIFileSenderSetTaskManager)(id, SEL, id);
 static signed char (*origGDIFileSenderSendFileToEdge)(id, SEL, id, unsigned char, unsigned char, id, long long);
+static id (*origCochraneInit)(id, SEL);
+static void (*origCochraneRetrieveDeviceData)(id, SEL);
+static void (*origCochraneDidReceiveData)(id, SEL, id, id);
+static void (*origCochraneDidWriteData)(id, SEL, id, id);
+static void (*origCochraneSendSystemEvent)(id, SEL, unsigned char);
 static id GCBLastFileSender;
 static UIButton *GCBUploadButton;
 
@@ -273,6 +278,38 @@ static void GCBGDIFileSenderSetTaskManager(id self, SEL _cmd, id taskManager) {
     if (origGDIFileSenderSetTaskManager) origGDIFileSenderSetTaskManager(self, _cmd, taskManager);
 }
 
+static void GCBCaptureCochrane(id self, NSString *source) {
+    if (!self) return;
+    GCBLastFileSender = self;
+    GCBLog(@"Captured Cochrane task manager via %@ self=%p class=%@", source, self, NSStringFromClass([self class]));
+}
+
+static id GCBCochraneInit(id self, SEL _cmd) {
+    id value = origCochraneInit ? origCochraneInit(self, _cmd) : self;
+    GCBCaptureCochrane(value, @"init");
+    return value;
+}
+
+static void GCBCochraneRetrieveDeviceData(id self, SEL _cmd) {
+    GCBCaptureCochrane(self, @"retrieveDeviceData");
+    if (origCochraneRetrieveDeviceData) origCochraneRetrieveDeviceData(self, _cmd);
+}
+
+static void GCBCochraneDidReceiveData(id self, SEL _cmd, id data, id characteristic) {
+    GCBCaptureCochrane(self, @"didReceiveData");
+    if (origCochraneDidReceiveData) origCochraneDidReceiveData(self, _cmd, data, characteristic);
+}
+
+static void GCBCochraneDidWriteData(id self, SEL _cmd, id data, id characteristic) {
+    GCBCaptureCochrane(self, @"didWriteData");
+    if (origCochraneDidWriteData) origCochraneDidWriteData(self, _cmd, data, characteristic);
+}
+
+static void GCBCochraneSendSystemEvent(id self, SEL _cmd, unsigned char event) {
+    GCBCaptureCochrane(self, @"sendSystemEvent");
+    if (origCochraneSendSystemEvent) origCochraneSendSystemEvent(self, _cmd, event);
+}
+
 static signed char GCBGDIFileSenderSendFileToEdge(id self, SEL _cmd, id file, unsigned char dataType, unsigned char subType, id deviceFilePath, long long identifier) {
     GCBLastFileSender = self;
     GCBLog(@"GDICochraneTaskManager sendFileToEdge self=%p file=%p fileClass=%@ dataType=%u subType=%u deviceFilePathClass=%@ identifier=%lld stack=%@",
@@ -483,6 +520,11 @@ static void GCBInstallHooks(void) {
         GCBDumpMethodsForClassName(class_getName(fileSender));
         GCBHookInstance(fileSender, @selector(initWithDelegate:taskManager:), (IMP)GCBGDIFileSenderInitWithDelegate, (IMP *)&origGDIFileSenderInitWithDelegate);
         GCBHookInstance(fileSender, sendFileSelector, (IMP)GCBGDIFileSenderSendFileToEdge, (IMP *)&origGDIFileSenderSendFileToEdge);
+        GCBHookInstance(fileSender, @selector(init), (IMP)GCBCochraneInit, (IMP *)&origCochraneInit);
+        GCBHookInstance(fileSender, @selector(retrieveDeviceData), (IMP)GCBCochraneRetrieveDeviceData, (IMP *)&origCochraneRetrieveDeviceData);
+        GCBHookInstance(fileSender, @selector(didReceiveData:fromCharacteristic:), (IMP)GCBCochraneDidReceiveData, (IMP *)&origCochraneDidReceiveData);
+        GCBHookInstance(fileSender, @selector(didWriteData:toCharacteristic:), (IMP)GCBCochraneDidWriteData, (IMP *)&origCochraneDidWriteData);
+        GCBHookInstance(fileSender, @selector(sendSystemEvent:), (IMP)GCBCochraneSendSystemEvent, (IMP *)&origCochraneSendSystemEvent);
         GCBLog(@"file sender sendFileToEdge types=%@", GCBTypeEncodingForSelector(fileSender, sendFileSelector));
     } else {
         GCBLog(@"No runtime class owns %@", NSStringFromSelector(sendFileSelector));
