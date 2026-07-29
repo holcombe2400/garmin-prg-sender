@@ -4,6 +4,8 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#include <limits.h>
+#include <stdlib.h>
 
 static const uint8_t GCBPRGType = 255;
 static const uint8_t GCBPRGSubtype = 17;
@@ -23,6 +25,7 @@ static signed char (*origGDIFileSenderSendFileToEdge)(id, SEL, id, unsigned char
 static id (*origGarminDeviceSendRequestProgressCompletion)(id, SEL, id, id, id);
 static id (*origSwiftFileReceiverInitWithDevice)(id, SEL, id);
 static id (*origSwiftFileSenderInitWithDevice)(id, SEL, id);
+static void (*origSwiftFileSenderSendFile)(id, SEL, id, unsigned int, unsigned char, id, unsigned long long, id, id);
 static id (*origCochraneInit)(id, SEL);
 static void (*origCochraneRetrieveDeviceData)(id, SEL);
 static void (*origCochraneDidReceiveData)(id, SEL, id, id);
@@ -34,9 +37,14 @@ static id GCBLastSwiftFileDevice;
 static id GCBActiveSwiftFileSender;
 static id GCBActiveSwiftProgressBlock;
 static id GCBActiveSwiftCompletionBlock;
+static unsigned int GCBLastSwiftFileSenderType;
+static unsigned char GCBLastSwiftFileSenderSubtype;
+static unsigned long long GCBLastSwiftFileSenderIdentifier;
+static BOOL GCBHasLastSwiftFileSenderType;
 static BOOL GCBGarminDeviceHookInstalled;
 static BOOL GCBSwiftFileReceiverHookInstalled;
 static BOOL GCBSwiftFileSenderHookInstalled;
+static BOOL GCBSwiftFileSenderSendHookInstalled;
 static UIButton *GCBUploadButton;
 
 static NSString *GCBDirPath(void) {
@@ -68,6 +76,25 @@ static BOOL GCBFileExists(NSString *name) {
 
 static BOOL GCBVerboseRuntime(void) {
     return GCBFileExists(@"verbose_runtime");
+}
+
+static void GCBLog(NSString *format, ...);
+static NSString *GCBReadTrimmedControlFile(NSString *name);
+
+static BOOL GCBReadUnsignedControlFile(NSString *name, unsigned long long *valueOut) {
+    NSString *value = GCBReadTrimmedControlFile(name);
+    if (!value.length) return NO;
+    const char *text = value.UTF8String;
+    if (!text || !*text) return NO;
+    char *end = NULL;
+    unsigned long long parsed = strtoull(text, &end, 0);
+    while (end && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) end++;
+    if (end == text || (end && *end)) {
+        GCBLog(@"Ignoring invalid numeric control %@=%@", name, value);
+        return NO;
+    }
+    if (valueOut) *valueOut = parsed;
+    return YES;
 }
 
 static NSString *GCBReadTrimmedControlFile(NSString *name) {
@@ -362,6 +389,49 @@ static id GCBSwiftFileSenderInitWithDevice(id self, SEL _cmd, id device) {
     return value;
 }
 
+static void GCBSwiftFileSenderSendFile(id self, SEL _cmd, id file, unsigned int fileType, unsigned char fileSubType, id filePathOnDevice, unsigned long long fileIdentifier, id progress, id completion) {
+    GCBHasLastSwiftFileSenderType = YES;
+    GCBLastSwiftFileSenderType = fileType;
+    GCBLastSwiftFileSenderSubtype = fileSubType;
+    GCBLastSwiftFileSenderIdentifier = fileIdentifier;
+    NSUInteger length = [file respondsToSelector:@selector(length)] ? (NSUInteger)((NSUInteger (*)(id, SEL))objc_msgSend)(file, @selector(length)) : 0;
+    NSString *stack = GCBVerboseRuntime() ? GCBStack() : @"<enable verbose_runtime for stack>";
+    GCBLog(@"Observed Swift FileSender sendFile sender=%p bytes=%lu fileTypeArg=%u fileSubType=%u path=%@ identifier=%llu stack=%@",
+           self, (unsigned long)length, fileType, fileSubType, filePathOnDevice, fileIdentifier, stack);
+    if (origSwiftFileSenderSendFile) {
+        origSwiftFileSenderSendFile(self, _cmd, file, fileType, fileSubType, filePathOnDevice, fileIdentifier, progress, completion);
+    }
+}
+
+static BOOL GCBSwiftUploadType(unsigned int *fileTypeOut, unsigned char *fileSubTypeOut, NSString **sourceOut) {
+    unsigned long long configured = 0;
+    if (GCBReadUnsignedControlFile(@"swift_file_type", &configured)) {
+        if (configured <= UINT_MAX) {
+            if (fileTypeOut) *fileTypeOut = (unsigned int)configured;
+            if (sourceOut) *sourceOut = @"swift_file_type";
+        } else {
+            GCBLog(@"Ignoring swift_file_type larger than UInt: %llu", configured);
+            return NO;
+        }
+    } else if (GCBHasLastSwiftFileSenderType) {
+        if (fileTypeOut) *fileTypeOut = GCBLastSwiftFileSenderType;
+        if (sourceOut) *sourceOut = @"last observed Garmin Connect send";
+    } else if (GCBFileExists(@"allow_unsafe_prg_raw_type")) {
+        if (fileTypeOut) *fileTypeOut = (unsigned int)GCBPRGType;
+        if (sourceOut) *sourceOut = @"allow_unsafe_prg_raw_type";
+    } else {
+        return NO;
+    }
+
+    unsigned long long configuredSubtype = 0;
+    if (GCBReadUnsignedControlFile(@"swift_file_subtype", &configuredSubtype) && configuredSubtype <= UCHAR_MAX) {
+        if (fileSubTypeOut) *fileSubTypeOut = (unsigned char)configuredSubtype;
+    } else {
+        if (fileSubTypeOut) *fileSubTypeOut = GCBPRGSubtype;
+    }
+    return YES;
+}
+
 static BOOL GCBUploadPRGViaSwiftFileSender(NSString *path, NSData *prgData, NSUInteger size) {
     id device = GCBLastSwiftFileDevice ?: GCBLastGarminDevice;
     if (!device) {
@@ -378,6 +448,16 @@ static BOOL GCBUploadPRGViaSwiftFileSender(NSString *path, NSData *prgData, NSUI
                fileSenderClass ? GCBTypeEncodingForSelector(fileSenderClass, initSelector) : @"<nil>",
                fileSenderClass ? GCBTypeEncodingForSelector(fileSenderClass, sendSelector) : @"<nil>");
         return NO;
+    }
+
+    unsigned int swiftFileType = 0;
+    unsigned char swiftFileSubType = GCBPRGSubtype;
+    NSString *typeSource = nil;
+    if (!GCBSwiftUploadType(&swiftFileType, &swiftFileSubType, &typeSource)) {
+        GCBLog(@"Upload PRG blocked before Swift FileSender call. No safe FileSender.FileType captured yet. lastType=%u hasLast=%d",
+               GCBLastSwiftFileSenderType, GCBHasLastSwiftFileSenderType);
+        GCBShowAlert(@"Upload PRG", @"I can see the Garmin file device, but I have not captured Garmin Connect's safe sender type yet. Run a sync/download once, then tap Upload PRG again.");
+        return YES;
     }
 
     id allocated = ((id (*)(id, SEL))objc_msgSend)(fileSenderClass, @selector(alloc));
@@ -404,11 +484,12 @@ static BOOL GCBUploadPRGViaSwiftFileSender(NSString *path, NSData *prgData, NSUI
         GCBActiveSwiftCompletionBlock = nil;
     } copy];
 
-    GCBLog(@"Upload PRG invoking Swift FileSender sender=%p device=%p path=%@ size=%lu type=%u subtype=%u identifier=%llu sendTypes=%@",
-           sender, device, path, (unsigned long)size, GCBPRGType, GCBPRGSubtype, identifier,
-           GCBTypeEncodingForSelector(fileSenderClass, sendSelector));
+    GCBLog(@"Upload PRG invoking Swift FileSender sender=%p device=%p path=%@ size=%lu fileTypeArg=%u subtype=%u source=%@ lastObservedType=%u lastObservedSubtype=%u lastObservedIdentifier=%llu identifier=%llu sendTypes=%@",
+           sender, device, path, (unsigned long)size, swiftFileType, swiftFileSubType, typeSource,
+           GCBLastSwiftFileSenderType, GCBLastSwiftFileSenderSubtype, GCBLastSwiftFileSenderIdentifier,
+           identifier, GCBTypeEncodingForSelector(fileSenderClass, sendSelector));
     ((void (*)(id, SEL, id, unsigned int, unsigned char, id, unsigned long long, id, id))objc_msgSend)(
-        sender, sendSelector, prgData, (unsigned int)GCBPRGType, (unsigned char)GCBPRGSubtype,
+        sender, sendSelector, prgData, swiftFileType, swiftFileSubType,
         nil, identifier, GCBActiveSwiftProgressBlock, GCBActiveSwiftCompletionBlock);
     GCBShowAlert(@"Upload PRG", [NSString stringWithFormat:@"Started via Garmin Connect Swift sender.\n%lu bytes", (unsigned long)size]);
     return YES;
@@ -582,6 +663,7 @@ static void GCBInstallGarminDeviceHook(void) {
 
 static void GCBInstallSwiftFileDeviceHooks(void) {
     SEL selector = @selector(initWithDevice:);
+    SEL sendSelector = NSSelectorFromString(@"sendFile:fileType:fileSubType:filePathOnDevice:fileIdentifier:progress:completion:");
     if (!GCBSwiftFileReceiverHookInstalled) {
         Class receiver = objc_getClass("_TtC16GarminDeviceSync12FileReceiver");
         if (receiver && class_getInstanceMethod(receiver, selector)) {
@@ -601,6 +683,17 @@ static void GCBInstallSwiftFileDeviceHooks(void) {
             GCBSwiftFileSenderHookInstalled = YES;
         } else {
             GCBLog(@"Swift FileSender class not ready");
+        }
+    }
+
+    if (!GCBSwiftFileSenderSendHookInstalled) {
+        Class sender = objc_getClass("_TtC16GarminDeviceSync10FileSender");
+        if (sender && class_getInstanceMethod(sender, sendSelector)) {
+            GCBLog(@"hooking Swift FileSender sendFile types=%@", GCBTypeEncodingForSelector(sender, sendSelector));
+            GCBHookInstance(sender, sendSelector, (IMP)GCBSwiftFileSenderSendFile, (IMP *)&origSwiftFileSenderSendFile);
+            GCBSwiftFileSenderSendHookInstalled = YES;
+        } else {
+            GCBLog(@"Swift FileSender sendFile not ready");
         }
     }
 }
