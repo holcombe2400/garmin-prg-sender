@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - "native/ios-garmin-sender/**"
+      - "native/garmin-connect-bypass-tweak/**"
       - ".github/workflows/build-native-ios.yml"
 
 jobs:
@@ -50,4 +51,15 @@ jobs:
         with:
           name: GarminNativeSender-deb
           path: native/ios-garmin-sender/packages/*.deb
+          if-no-files-found: error
+
+      - name: Build Garmin Connect bypass tweak
+        working-directory: native/garmin-connect-bypass-tweak
+        run: make clean package FINALPACKAGE=1 STRIP=0 messages=yes
+
+      - name: Upload bypass tweak Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: GarminConnectBypass-deb
+          path: native/garmin-connect-bypass-tweak/packages/*.deb
           if-no-files-found: error

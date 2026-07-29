@@ -1,0 +1,9 @@
+Package: com.holcombe.garminconnectbypass
+Name: Garmin Connect Bypass
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: Logs and experiments with Garmin Connect device support gates on iOS 10.
+Maintainer: Codex <codex@local>
+Author: Codex <codex@local>
+Section: Tweaks
+Depends: mobilesubstrate
