@@ -15,11 +15,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl git make perl rsync xz-utils
+
       - name: Setup Theos
-        uses: beerpiss/theos-action@v1
-        with:
-          cache: true
-          theos-sdks: https://github.com/theos/sdks
+        run: |
+          set -euxo pipefail
+          git clone --recursive https://github.com/theos/theos "$GITHUB_WORKSPACE/theos"
+          echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
+
+          mkdir -p "$GITHUB_WORKSPACE/theos/toolchain" "$GITHUB_WORKSPACE/theos/sdks"
+
+          curl -L --fail \
+            https://github.com/kabiroberai/swift-toolchain-linux/releases/download/v2.1.0/swift-5.6.1-ubuntu20.04.tar.xz \
+            -o /tmp/theos-linux-toolchain.tar.xz
+          tar -xJf /tmp/theos-linux-toolchain.tar.xz -C "$GITHUB_WORKSPACE/theos/toolchain"
+
+          curl -L --fail \
+            https://github.com/theos/sdks/archive/refs/heads/master.tar.gz \
+            -o /tmp/theos-sdks.tar.gz
+          tar -xzf /tmp/theos-sdks.tar.gz --strip-components=1 -C "$GITHUB_WORKSPACE/theos/sdks"
 
       - name: Show Theos SDKs
         run: find "$THEOS/sdks" -maxdepth 1 -type d -name "iPhoneOS*.sdk" -print
