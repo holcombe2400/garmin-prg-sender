@@ -8,12 +8,15 @@ typedef NS_ENUM(uint16_t, GNGarminMessage) {
     GNGarminMessageUploadRequest = 5003,
     GNGarminMessageFileTransferData = 5004,
     GNGarminMessageCreateFile = 5005,
+    GNGarminMessageSetFileFlag = 5008,
     GNGarminMessageSystemEvent = 5030,
+    GNGarminMessageSynchronization = 5037,
 };
 
 typedef NS_ENUM(uint8_t, GNSystemEvent) {
     GNSystemEventSyncComplete = 0,
     GNSystemEventSyncReady = 8,
+    GNSystemEventNewDownloadAvailable = 9,
     GNSystemEventDeviceDisconnect = 11,
 };
 
@@ -24,6 +27,8 @@ NSData *GNBuildCreateFile(NSUInteger fileSize);
 NSData *GNBuildUploadRequest(uint16_t fileIndex, NSUInteger fileSize, uint32_t dataOffset, uint16_t crcSeed);
 NSData *GNBuildFileTransferData(NSData *chunk, uint32_t dataOffset, uint16_t runningCRC);
 NSData *GNBuildSystemEvent(uint8_t event, uint8_t value);
+NSData *GNBuildSetFileFlagArchive(uint16_t fileIdentifier);
+NSData *GNBuildSynchronization(uint8_t syncType, BOOL eightByteBitmask);
 NSDictionary *GNParseGFDIStatus(NSData *packet, NSError **error);
 NSString *GNHexPreview(NSData *data, NSUInteger maxBytes);
 uint16_t GNReadU16(NSData *data, NSUInteger offset);

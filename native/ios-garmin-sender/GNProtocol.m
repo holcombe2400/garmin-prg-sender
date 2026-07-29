@@ -2,6 +2,8 @@
 
 const uint8_t GNPRGType = 255;
 const uint8_t GNPRGSubtype = 17;
+static const uint32_t GNInstallSyncBit = 1u << 17;
+static const uint8_t GNSetFileFlagArchive = 0x10;
 
 static const uint16_t GNCRCConstants[] = {
     0x0000, 0xcc01, 0xd801, 0x1400, 0xf001, 0x3c00, 0x2800, 0xe401,
@@ -107,6 +109,25 @@ NSData *GNBuildSystemEvent(uint8_t event, uint8_t value) {
     GNAppendU8(payload, event);
     GNAppendU8(payload, value);
     return GNFrameGFDI(GNGarminMessageSystemEvent, payload);
+}
+
+NSData *GNBuildSetFileFlagArchive(uint16_t fileIdentifier) {
+    NSMutableData *payload = [NSMutableData data];
+    GNAppendU16(payload, fileIdentifier);
+    GNAppendU8(payload, GNSetFileFlagArchive);
+    return GNFrameGFDI(GNGarminMessageSetFileFlag, payload);
+}
+
+NSData *GNBuildSynchronization(uint8_t syncType, BOOL eightByteBitmask) {
+    NSMutableData *payload = [NSMutableData data];
+    GNAppendU8(payload, syncType);
+    GNAppendU8(payload, eightByteBitmask ? 8 : 4);
+    if (eightByteBitmask) {
+        GNAppendU64(payload, GNInstallSyncBit);
+    } else {
+        GNAppendU32(payload, GNInstallSyncBit);
+    }
+    return GNFrameGFDI(GNGarminMessageSynchronization, payload);
 }
 
 NSData *GNCobsEncode(NSData *data) {
@@ -224,6 +245,12 @@ NSDictionary *GNParseGFDIStatus(NSData *packet, NSError **error) {
         result[@"kind"] = @"fileTransferData";
         result[@"transferStatus"] = @(r[0]);
         result[@"dataOffset"] = @(GNReadU32(rest, 1));
+    } else if (original == GNGarminMessageSetFileFlag && status == 0 && rest.length >= 4) {
+        const uint8_t *r = rest.bytes;
+        result[@"kind"] = @"setFileFlag";
+        result[@"flagsStatus"] = @(r[0]);
+        result[@"fileIdentifier"] = @(GNReadU16(rest, 1));
+        result[@"flags"] = @(r[3]);
     }
     return result;
 }

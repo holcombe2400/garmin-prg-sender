@@ -662,9 +662,10 @@ static NSString *GNLocalHex(NSData *data) {
         return;
     }
     uint16_t fileIndex = [create[@"fileIndex"] unsignedShortValue];
+    uint16_t fileNumber = [create[@"fileNumber"] unsignedShortValue];
     [self progress:0 total:data.length];
 
-    [self log:[NSString stringWithFormat:@"Starting upload to file index %u.", fileIndex]];
+    [self log:[NSString stringWithFormat:@"Starting upload to file index %u file number %u.", fileIndex, fileNumber]];
     [self sendGfdi:GNBuildUploadRequest(fileIndex, data.length, 0, 0) label:@"UPLOAD_REQUEST"];
     NSDictionary *upload = [self waitForKind:@"uploadRequest" timeout:GNGfdiTimeout];
     if (!upload || [upload[@"status"] unsignedCharValue] != 0 || [upload[@"uploadStatus"] unsignedCharValue] != 0) {
@@ -705,16 +706,74 @@ static NSString *GNLocalHex(NSData *data) {
         }
     }
 
-    [self log:@"Sending SYNC_COMPLETE."];
-    [self sendGfdi:GNBuildSystemEvent(GNSystemEventSyncComplete, 0) label:@"SYNC_COMPLETE"];
-    [self waitForOriginal:GNGarminMessageSystemEvent timeout:GNGfdiTimeout];
-    [self log:@"Sending DEVICE_DISCONNECT registration trigger."];
-    [self sendGfdi:GNBuildSystemEvent(GNSystemEventDeviceDisconnect, 0) label:@"DEVICE_DISCONNECT"];
-    [self waitForOriginal:GNGarminMessageSystemEvent timeout:5.0];
+    [self runIndexTriggerLadderWithFileIndex:fileIndex fileNumber:fileNumber];
     NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceDate:self.uploadStartedAt];
     double kbps = elapsed > 0 ? (double)data.length / 1024.0 / elapsed : 0;
     [self log:[NSString stringWithFormat:@"Upload complete. %.1f KB/s average over %.0fs.", kbps, elapsed]];
-    [self updateStatus:@"Upload complete. Watch should disconnect/index if trigger worked."];
+    [self updateStatus:@"Upload complete. Index ladder sent; reconnect/watch screen tells us if it worked."];
+}
+
+- (void)runIndexTriggerLadderWithFileIndex:(uint16_t)fileIndex fileNumber:(uint16_t)fileNumber {
+    [self log:@"Index ladder: baseline SYNC_COMPLETE."];
+    [self sendSystemEvent:GNSystemEventSyncComplete description:@"SYNC_COMPLETE" timeout:GNGfdiTimeout];
+
+    [self log:@"Index ladder: NEW_DOWNLOAD_AVAILABLE then SYNC_COMPLETE."];
+    [self sendSystemEvent:GNSystemEventNewDownloadAvailable description:@"NEW_DOWNLOAD_AVAILABLE" timeout:GNGfdiTimeout];
+    [self sendSystemEvent:GNSystemEventSyncComplete description:@"SYNC_COMPLETE after new download" timeout:GNGfdiTimeout];
+
+    [self log:[NSString stringWithFormat:@"Index ladder: SET_FILE_FLAG ARCHIVE using file_index=%u.", fileIndex]];
+    [self sendGfdi:GNBuildSetFileFlagArchive(fileIndex) label:@"SET_FILE_FLAG ARCHIVE file_index"];
+    NSDictionary *flagIndex = [self waitForOriginal:GNGarminMessageSetFileFlag timeout:GNGfdiTimeout returnStatus:YES];
+    [self logStatus:flagIndex description:@"SET_FILE_FLAG file_index"];
+
+    [self log:[NSString stringWithFormat:@"Index ladder: SET_FILE_FLAG ARCHIVE using file_number=%u.", fileNumber]];
+    [self sendGfdi:GNBuildSetFileFlagArchive(fileNumber) label:@"SET_FILE_FLAG ARCHIVE file_number"];
+    NSDictionary *flagNumber = [self waitForOriginal:GNGarminMessageSetFileFlag timeout:GNGfdiTimeout returnStatus:YES];
+    [self logStatus:flagNumber description:@"SET_FILE_FLAG file_number"];
+
+    for (uint8_t syncType = 0; syncType <= 2; syncType++) {
+        [self sendSynchronizationType:syncType eightByteBitmask:NO];
+    }
+    for (uint8_t syncType = 0; syncType <= 2; syncType++) {
+        [self sendSynchronizationType:syncType eightByteBitmask:YES];
+    }
+
+    [self log:@"Index ladder: final SYNC_COMPLETE."];
+    [self sendSystemEvent:GNSystemEventSyncComplete description:@"final SYNC_COMPLETE" timeout:GNGfdiTimeout];
+
+    [self log:@"Index ladder: DEVICE_DISCONNECT then iOS BLE disconnect."];
+    [self sendSystemEvent:GNSystemEventDeviceDisconnect description:@"DEVICE_DISCONNECT" timeout:5.0];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.peripheral) {
+            [self.central cancelPeripheralConnection:self.peripheral];
+            [self log:@"Requested iOS BLE disconnect after DEVICE_DISCONNECT."];
+        }
+    });
+}
+
+- (void)sendSynchronizationType:(uint8_t)syncType eightByteBitmask:(BOOL)eightByteBitmask {
+    NSString *description = [NSString stringWithFormat:@"SYNCHRONIZATION type %u INSTALL %@",
+                             syncType,
+                             eightByteBitmask ? @"8-byte bitmask" : @"4-byte bitmask"];
+    [self log:[NSString stringWithFormat:@"Index ladder: %@.", description]];
+    [self sendGfdi:GNBuildSynchronization(syncType, eightByteBitmask) label:description];
+    NSDictionary *status = [self waitForOriginal:GNGarminMessageSynchronization timeout:GNGfdiTimeout returnStatus:YES];
+    [self logStatus:status description:description];
+}
+
+- (void)sendSystemEvent:(uint8_t)event description:(NSString *)description timeout:(NSTimeInterval)timeout {
+    [self log:[NSString stringWithFormat:@"Sending %@.", description]];
+    [self sendGfdi:GNBuildSystemEvent(event, 0) label:description];
+    NSDictionary *status = [self waitForOriginal:GNGarminMessageSystemEvent timeout:timeout returnStatus:YES];
+    [self logStatus:status description:description];
+}
+
+- (void)logStatus:(NSDictionary *)status description:(NSString *)description {
+    if (!status) {
+        [self log:[NSString stringWithFormat:@"%@: no ACK/status before timeout.", description]];
+        return;
+    }
+    [self log:[NSString stringWithFormat:@"%@ status: %@", description, status]];
 }
 
 - (NSDictionary *)waitForKind:(NSString *)kind timeout:(NSTimeInterval)timeout {
@@ -724,10 +783,16 @@ static NSString *GNLocalHex(NSData *data) {
 }
 
 - (BOOL)waitForOriginal:(uint16_t)messageType timeout:(NSTimeInterval)timeout {
+    NSDictionary *status = [self waitForOriginal:messageType timeout:timeout returnStatus:YES];
+    return status && [status[@"status"] unsignedCharValue] == 0;
+}
+
+- (NSDictionary *)waitForOriginal:(uint16_t)messageType timeout:(NSTimeInterval)timeout returnStatus:(BOOL)returnStatus {
+    (void)returnStatus;
     NSDictionary *status = [self waitForStatusMatching:^BOOL(NSDictionary *candidate) {
         return [candidate[@"originalMessageType"] unsignedShortValue] == messageType;
     } timeout:timeout];
-    return status && [status[@"status"] unsignedCharValue] == 0;
+    return status;
 }
 
 - (NSDictionary *)waitForStatusMatching:(GNStatusMatcher)matcher timeout:(NSTimeInterval)timeout {
