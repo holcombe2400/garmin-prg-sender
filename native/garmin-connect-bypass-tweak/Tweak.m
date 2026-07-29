@@ -20,10 +20,6 @@ static id (*origGDIFileSenderInitWithDelegate)(id, SEL, id, id);
 static id (*origGDIFileSenderInitWithTaskManager)(id, SEL, id);
 static void (*origGDIFileSenderSetTaskManager)(id, SEL, id);
 static signed char (*origGDIFileSenderSendFileToEdge)(id, SEL, id, unsigned char, unsigned char, id, long long);
-static id (*origGDIFileSenderSendRequestProgressCompletion)(id, SEL, id, id, id);
-static id (*origGDIFileSenderSendCreateFileRequestProgressCompletion)(id, SEL, id, id, id);
-static id (*origGDIFileSenderSendUploadRequestProgressCompletion)(id, SEL, id, id, id);
-static id (*origGDIFileSenderSendFileTransferDataRequestProgressCompletion)(id, SEL, id, id, id);
 static id (*origCochraneInit)(id, SEL);
 static void (*origCochraneRetrieveDeviceData)(id, SEL);
 static void (*origCochraneDidReceiveData)(id, SEL, id, id);
@@ -456,30 +452,6 @@ static signed char GCBGDIFileSenderSendFileToEdge(id self, SEL _cmd, id file, un
     return origGDIFileSenderSendFileToEdge ? origGDIFileSenderSendFileToEdge(self, _cmd, file, dataType, subType, deviceFilePath, identifier) : 0;
 }
 
-static id GCBGDIFileSenderSendRequestProgressCompletion(id self, SEL _cmd, id request, id progress, id completion) {
-    GCBLastFileSender = self;
-    GCBInspectRequest(request, @"GDIFileSender sendRequest:progress:completion:");
-    return origGDIFileSenderSendRequestProgressCompletion ? origGDIFileSenderSendRequestProgressCompletion(self, _cmd, request, progress, completion) : nil;
-}
-
-static id GCBGDIFileSenderSendCreateFileRequestProgressCompletion(id self, SEL _cmd, id request, id progress, id completion) {
-    GCBLastFileSender = self;
-    GCBInspectRequest(request, @"GDIFileSender sendCreateFileRequest:progress:completion:");
-    return origGDIFileSenderSendCreateFileRequestProgressCompletion ? origGDIFileSenderSendCreateFileRequestProgressCompletion(self, _cmd, request, progress, completion) : nil;
-}
-
-static id GCBGDIFileSenderSendUploadRequestProgressCompletion(id self, SEL _cmd, id request, id progress, id completion) {
-    GCBLastFileSender = self;
-    GCBInspectRequest(request, @"GDIFileSender sendUploadRequest:progress:completion:");
-    return origGDIFileSenderSendUploadRequestProgressCompletion ? origGDIFileSenderSendUploadRequestProgressCompletion(self, _cmd, request, progress, completion) : nil;
-}
-
-static id GCBGDIFileSenderSendFileTransferDataRequestProgressCompletion(id self, SEL _cmd, id request, id progress, id completion) {
-    GCBLastFileSender = self;
-    GCBInspectRequest(request, @"GDIFileSender sendFileTransferDataRequest:progress:completion:");
-    return origGDIFileSenderSendFileTransferDataRequestProgressCompletion ? origGDIFileSenderSendFileTransferDataRequestProgressCompletion(self, _cmd, request, progress, completion) : nil;
-}
-
 static void GCBDeviceSendRequestCompletion(id self, SEL _cmd, id request, id completion) {
     GCBLastDevice = self;
     GCBInspectRequest(request, @"Device sendRequest:completion:");
@@ -625,22 +597,18 @@ static Class GCBFindClassWithInstanceSelector(SEL selector, NSString *nameHint) 
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
     Class found = Nil;
-    Class fallback = Nil;
     NSMutableArray *matches = [NSMutableArray array];
     for (unsigned int i = 0; i < count; i++) {
         Class cls = classes[i];
         if (!class_getInstanceMethod(cls, selector)) continue;
         NSString *name = [NSString stringWithUTF8String:class_getName(cls)];
         [matches addObject:name ?: @"<unknown>"];
-        if (!fallback) fallback = cls;
-        if (!nameHint.length || [name containsString:nameHint]) {
-            found = cls;
-            break;
-        }
+        if (!found && (!nameHint.length || [name containsString:nameHint])) found = cls;
+        if (!found) found = cls;
     }
     GCBLog(@"selector %@ matches %@", NSStringFromSelector(selector), [matches componentsJoinedByString:@", "]);
     free(classes);
-    return found ?: fallback;
+    return found;
 }
 
 static void GCBDumpInterestingClasses(void) {
@@ -690,10 +658,6 @@ static void GCBInstallHooks(void) {
         GCBDumpMethodsForClassName("GDIFileSender");
         GCBHookInstance(nominalFileSender, @selector(initWithTaskManager:), (IMP)GCBGDIFileSenderInitWithTaskManager, (IMP *)&origGDIFileSenderInitWithTaskManager);
         GCBHookInstance(nominalFileSender, @selector(setTaskManager:), (IMP)GCBGDIFileSenderSetTaskManager, (IMP *)&origGDIFileSenderSetTaskManager);
-        GCBHookInstance(nominalFileSender, @selector(sendRequest:progress:completion:), (IMP)GCBGDIFileSenderSendRequestProgressCompletion, (IMP *)&origGDIFileSenderSendRequestProgressCompletion);
-        GCBHookInstance(nominalFileSender, @selector(sendCreateFileRequest:progress:completion:), (IMP)GCBGDIFileSenderSendCreateFileRequestProgressCompletion, (IMP *)&origGDIFileSenderSendCreateFileRequestProgressCompletion);
-        GCBHookInstance(nominalFileSender, @selector(sendUploadRequest:progress:completion:), (IMP)GCBGDIFileSenderSendUploadRequestProgressCompletion, (IMP *)&origGDIFileSenderSendUploadRequestProgressCompletion);
-        GCBHookInstance(nominalFileSender, @selector(sendFileTransferDataRequest:progress:completion:), (IMP)GCBGDIFileSenderSendFileTransferDataRequestProgressCompletion, (IMP *)&origGDIFileSenderSendFileTransferDataRequestProgressCompletion);
     } else {
         GCBLog(@"GDIFileSender class not found");
     }
@@ -729,11 +693,14 @@ static void GCBInstallHooks(void) {
 
     SEL requestSenderSelector = @selector(sendRequest:progress:completion:);
     Class requestSender = objc_getClass("_TtC14GarminDeviceIO17GFDIRequestSender");
-    if (requestSender && class_getInstanceMethod(requestSender, requestSenderSelector)) {
+    if (!requestSender || !class_getInstanceMethod(requestSender, requestSenderSelector)) {
+        requestSender = GCBFindClassWithInstanceSelector(requestSenderSelector, @"GFDIRequestSender");
+    }
+    if (requestSender) {
         GCBDumpMethodsForClassName(class_getName(requestSender));
         GCBHookInstance(requestSender, requestSenderSelector, (IMP)GCBRequestSenderSendRequestProgressCompletion, (IMP *)&origRequestSenderSendRequestProgressCompletion);
     } else {
-        GCBLog(@"GFDIRequestSender %@ not hookable", requestSender ? @"found but selector missing" : @"class not found");
+        GCBLog(@"No runtime class owns %@", NSStringFromSelector(requestSenderSelector));
     }
 
     GCBDumpMethodsForClassName("_TtC22GarminDeviceIOMessages17CreateFileRequest");
