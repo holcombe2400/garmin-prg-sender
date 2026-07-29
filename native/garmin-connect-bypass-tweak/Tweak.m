@@ -21,6 +21,12 @@ static id (*origAlertController)(id, SEL, NSString *, NSString *, NSInteger);
 static id (*origGDIFileSenderInitWithDelegate)(id, SEL, id, id);
 static id (*origGDIFileSenderInitWithTaskManager)(id, SEL, id);
 static void (*origGDIFileSenderSetTaskManager)(id, SEL, id);
+static void (*origGDIFileSenderSetFileDataType)(id, SEL, unsigned char);
+static void (*origGDIFileSenderSetFileDataSubType)(id, SEL, unsigned char);
+static void (*origGDIFileSenderSetFilePath)(id, SEL, id);
+static id (*origGDIFileSenderSendCreateFileRequest)(id, SEL, id, id, id);
+static id (*origGDIFileSenderSendUploadRequest)(id, SEL, id, id, id);
+static id (*origGDIFileSenderSendFileTransferDataRequest)(id, SEL, id, id, id);
 static signed char (*origGDIFileSenderSendFileToEdge)(id, SEL, id, unsigned char, unsigned char, id, long long);
 static id (*origGarminDeviceSendRequestProgressCompletion)(id, SEL, id, id, id);
 static id (*origSwiftFileReceiverInitWithDevice)(id, SEL, id);
@@ -86,6 +92,8 @@ static BOOL GCBVerboseRuntime(void) {
 static void GCBLog(NSString *format, ...);
 static NSString *GCBReadTrimmedControlFile(NSString *name);
 static void GCBDumpMethodsForClassName(const char *name);
+static void GCBApplyRawPRGCreateRequestOverride(id request);
+static void GCBDumpCreateFileRequest(id request, NSString *source);
 
 static BOOL GCBReadUnsignedControlFile(NSString *name, unsigned long long *valueOut) {
     NSString *value = GCBReadTrimmedControlFile(name);
@@ -484,6 +492,91 @@ static void GCBApplyRawPRGCreateRequestOverride(id request) {
     }
 
     GCBDumpCreateFileRequest(request, @"after raw override");
+}
+
+static void GCBGDIFileSenderSetFileDataType(id self, SEL _cmd, unsigned char fileDataType) {
+    unsigned char value = (GCBActivePRGCreateOverride && GCBRawPRGStageMode()) ? GCBPRGType : fileDataType;
+    if (value != fileDataType) {
+        GCBLog(@"GDIFileSender.fileDataType override %u -> %u self=%p", fileDataType, value, self);
+    } else if (GCBActivePRGCreateOverride || GCBVerboseRuntime()) {
+        GCBLog(@"GDIFileSender.fileDataType set %u self=%p", fileDataType, self);
+    }
+    if (origGDIFileSenderSetFileDataType) origGDIFileSenderSetFileDataType(self, _cmd, value);
+}
+
+static void GCBGDIFileSenderSetFileDataSubType(id self, SEL _cmd, unsigned char fileDataSubType) {
+    unsigned char value = (GCBActivePRGCreateOverride && GCBRawPRGStageMode()) ? GCBPRGSubtype : fileDataSubType;
+    if (value != fileDataSubType) {
+        GCBLog(@"GDIFileSender.fileDataSubType override %u -> %u self=%p", fileDataSubType, value, self);
+    } else if (GCBActivePRGCreateOverride || GCBVerboseRuntime()) {
+        GCBLog(@"GDIFileSender.fileDataSubType set %u self=%p", fileDataSubType, self);
+    }
+    if (origGDIFileSenderSetFileDataSubType) origGDIFileSenderSetFileDataSubType(self, _cmd, value);
+}
+
+static void GCBGDIFileSenderSetFilePath(id self, SEL _cmd, id filePath) {
+    id value = (GCBActivePRGCreateOverride && GCBRawPRGStageMode()) ? nil : filePath;
+    if (filePath && !value) {
+        GCBLog(@"GDIFileSender.filePath override %@ -> nil self=%p", filePath, self);
+    } else if (GCBActivePRGCreateOverride || GCBVerboseRuntime()) {
+        GCBLog(@"GDIFileSender.filePath set %@ self=%p", filePath, self);
+    }
+    if (origGDIFileSenderSetFilePath) origGDIFileSenderSetFilePath(self, _cmd, value);
+}
+
+static void GCBForceGDIFileSenderRawFields(id sender, NSString *source) {
+    if (!sender || !GCBActivePRGCreateOverride || !GCBRawPRGStageMode()) return;
+    @try {
+        NSString *beforeType = GCBObjectValueForGetter(sender, @selector(fileDataType));
+        NSString *beforeSubType = GCBObjectValueForGetter(sender, @selector(fileDataSubType));
+        NSString *beforePath = GCBObjectValueForGetter(sender, @selector(filePath));
+        GCBLog(@"GDIFileSender %@ before force type=%@ subType=%@ path=%@ self=%p", source, beforeType, beforeSubType, beforePath, sender);
+        if ([sender respondsToSelector:@selector(setFileDataType:)]) {
+            ((void (*)(id, SEL, unsigned char))objc_msgSend)(sender, @selector(setFileDataType:), GCBPRGType);
+        }
+        if ([sender respondsToSelector:@selector(setFileDataSubType:)]) {
+            ((void (*)(id, SEL, unsigned char))objc_msgSend)(sender, @selector(setFileDataSubType:), GCBPRGSubtype);
+        }
+        if ([sender respondsToSelector:@selector(setFilePath:)]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(sender, @selector(setFilePath:), nil);
+        }
+        GCBLog(@"GDIFileSender %@ after force type=%@ subType=%@ path=%@ self=%p",
+               source,
+               GCBObjectValueForGetter(sender, @selector(fileDataType)),
+               GCBObjectValueForGetter(sender, @selector(fileDataSubType)),
+               GCBObjectValueForGetter(sender, @selector(filePath)),
+               sender);
+    } @catch (NSException *exception) {
+        GCBLog(@"GDIFileSender %@ force exception %@ %@", source, exception.name, exception.reason);
+    }
+}
+
+static id GCBGDIFileSenderSendCreateFileRequest(id self, SEL _cmd, id request, id progress, id completion) {
+    GCBLog(@"GDIFileSender sendCreateFileRequest self=%p request=%p requestClass=%@ activePRG=%d rawStage=%d",
+           self, request, request ? NSStringFromClass([request class]) : @"<nil>",
+           GCBActivePRGCreateOverride, GCBRawPRGStageMode());
+    GCBForceGDIFileSenderRawFields(self, @"before sendCreateFileRequest");
+    if (GCBRequestLooksLikeCreateFile(request)) {
+        GCBDumpCreateFileRequest(request, @"at GDI sendCreateFileRequest");
+        GCBApplyRawPRGCreateRequestOverride(request);
+    }
+    return origGDIFileSenderSendCreateFileRequest ? origGDIFileSenderSendCreateFileRequest(self, _cmd, request, progress, completion) : nil;
+}
+
+static id GCBGDIFileSenderSendUploadRequest(id self, SEL _cmd, id request, id progress, id completion) {
+    if (GCBActivePRGCreateOverride || GCBVerboseRuntime()) {
+        GCBLog(@"GDIFileSender sendUploadRequest self=%p request=%p requestClass=%@ desc=%@",
+               self, request, request ? NSStringFromClass([request class]) : @"<nil>", request);
+    }
+    return origGDIFileSenderSendUploadRequest ? origGDIFileSenderSendUploadRequest(self, _cmd, request, progress, completion) : nil;
+}
+
+static id GCBGDIFileSenderSendFileTransferDataRequest(id self, SEL _cmd, id request, id progress, id completion) {
+    if (GCBVerboseRuntime()) {
+        GCBLog(@"GDIFileSender sendFileTransferDataRequest self=%p request=%p requestClass=%@ desc=%@",
+               self, request, request ? NSStringFromClass([request class]) : @"<nil>", request);
+    }
+    return origGDIFileSenderSendFileTransferDataRequest ? origGDIFileSenderSendFileTransferDataRequest(self, _cmd, request, progress, completion) : nil;
 }
 
 static id GCBGarminDeviceSendRequestProgressCompletion(id self, SEL _cmd, id request, id progress, id completion) {
@@ -926,6 +1019,12 @@ static void GCBInstallHooks(void) {
         if (GCBVerboseRuntime()) GCBDumpMethodsForClassName("GDIFileSender");
         GCBHookInstance(nominalFileSender, @selector(initWithTaskManager:), (IMP)GCBGDIFileSenderInitWithTaskManager, (IMP *)&origGDIFileSenderInitWithTaskManager);
         GCBHookInstance(nominalFileSender, @selector(setTaskManager:), (IMP)GCBGDIFileSenderSetTaskManager, (IMP *)&origGDIFileSenderSetTaskManager);
+        GCBHookInstance(nominalFileSender, @selector(setFileDataType:), (IMP)GCBGDIFileSenderSetFileDataType, (IMP *)&origGDIFileSenderSetFileDataType);
+        GCBHookInstance(nominalFileSender, @selector(setFileDataSubType:), (IMP)GCBGDIFileSenderSetFileDataSubType, (IMP *)&origGDIFileSenderSetFileDataSubType);
+        GCBHookInstance(nominalFileSender, @selector(setFilePath:), (IMP)GCBGDIFileSenderSetFilePath, (IMP *)&origGDIFileSenderSetFilePath);
+        GCBHookInstance(nominalFileSender, @selector(sendCreateFileRequest:progress:completion:), (IMP)GCBGDIFileSenderSendCreateFileRequest, (IMP *)&origGDIFileSenderSendCreateFileRequest);
+        GCBHookInstance(nominalFileSender, @selector(sendUploadRequest:progress:completion:), (IMP)GCBGDIFileSenderSendUploadRequest, (IMP *)&origGDIFileSenderSendUploadRequest);
+        GCBHookInstance(nominalFileSender, @selector(sendFileTransferDataRequest:progress:completion:), (IMP)GCBGDIFileSenderSendFileTransferDataRequest, (IMP *)&origGDIFileSenderSendFileTransferDataRequest);
     } else {
         GCBLog(@"GDIFileSender class not found");
     }
