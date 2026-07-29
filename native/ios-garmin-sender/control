@@ -1,0 +1,8 @@
+Package: com.holcombe.garminnativesender
+Name: Garmin Native Sender
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: Native Garmin PRG BLE sender and protocol trace probe for jailbroken iOS 10 devices.
+Maintainer: James Holcombe
+Author: James Holcombe
+Section: Utilities
