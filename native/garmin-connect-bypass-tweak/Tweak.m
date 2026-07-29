@@ -165,6 +165,12 @@ static NSString *GCBPRGPath(void) {
     return candidates.firstObject;
 }
 
+static NSString *GCBPRGDevicePath(void) {
+    NSString *configured = GCBReadTrimmedControlFile(@"device_file_path");
+    if (configured.length) return configured;
+    return @"GARMIN/APPS/MEDIA\\CODX0001.PRG";
+}
+
 static void GCBShowAlert(NSString *title, NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIViewController *root = [UIApplication sharedApplication].keyWindow.rootViewController;
@@ -484,13 +490,14 @@ static BOOL GCBUploadPRGViaSwiftFileSender(NSString *path, NSData *prgData, NSUI
         GCBActiveSwiftCompletionBlock = nil;
     } copy];
 
-    GCBLog(@"Upload PRG invoking Swift FileSender sender=%p device=%p path=%@ size=%lu fileTypeArg=%u subtype=%u source=%@ lastObservedType=%u lastObservedSubtype=%u lastObservedIdentifier=%llu identifier=%llu sendTypes=%@",
-           sender, device, path, (unsigned long)size, swiftFileType, swiftFileSubType, typeSource,
+    NSString *devicePath = GCBPRGDevicePath();
+    GCBLog(@"Upload PRG invoking Swift FileSender sender=%p device=%p path=%@ devicePath=%@ size=%lu fileTypeArg=%u subtype=%u source=%@ lastObservedType=%u lastObservedSubtype=%u lastObservedIdentifier=%llu identifier=%llu sendTypes=%@",
+           sender, device, path, devicePath, (unsigned long)size, swiftFileType, swiftFileSubType, typeSource,
            GCBLastSwiftFileSenderType, GCBLastSwiftFileSenderSubtype, GCBLastSwiftFileSenderIdentifier,
            identifier, GCBTypeEncodingForSelector(fileSenderClass, sendSelector));
     ((void (*)(id, SEL, id, unsigned int, unsigned char, id, unsigned long long, id, id))objc_msgSend)(
         sender, sendSelector, prgData, swiftFileType, swiftFileSubType,
-        nil, identifier, GCBActiveSwiftProgressBlock, GCBActiveSwiftCompletionBlock);
+        devicePath, identifier, GCBActiveSwiftProgressBlock, GCBActiveSwiftCompletionBlock);
     GCBShowAlert(@"Upload PRG", [NSString stringWithFormat:@"Started via Garmin Connect Swift sender.\n%lu bytes", (unsigned long)size]);
     return YES;
 }
@@ -528,19 +535,19 @@ static void GCBUploadPRGNow(void) {
     }
 
     long long identifier = (((long long)[[NSDate date] timeIntervalSince1970]) << 16) | (long long)(arc4random() & 0xffff);
-    id nilPath = nil;
+    id devicePath = GCBPRGDevicePath();
     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:signature];
     inv.target = sender;
     inv.selector = selector;
     GCBSetInvocationArg(inv, 2, [signature getArgumentTypeAtIndex:2], prgData, 0);
     GCBSetInvocationArg(inv, 3, [signature getArgumentTypeAtIndex:3], nil, GCBPRGType);
     GCBSetInvocationArg(inv, 4, [signature getArgumentTypeAtIndex:4], nil, GCBPRGSubtype);
-    GCBSetInvocationArg(inv, 5, [signature getArgumentTypeAtIndex:5], nilPath, 0);
+    GCBSetInvocationArg(inv, 5, [signature getArgumentTypeAtIndex:5], devicePath, 0);
     GCBSetInvocationArg(inv, 6, [signature getArgumentTypeAtIndex:6], nil, identifier);
     [inv retainArguments];
 
-    GCBLog(@"Upload PRG invoking sender=%p path=%@ size=%lu type=%u subtype=%u identifier=%lld signature=%@",
-           sender, path, (unsigned long)size, GCBPRGType, GCBPRGSubtype, identifier, signature);
+    GCBLog(@"Upload PRG invoking sender=%p path=%@ devicePath=%@ size=%lu type=%u subtype=%u identifier=%lld signature=%@",
+           sender, path, devicePath, (unsigned long)size, GCBPRGType, GCBPRGSubtype, identifier, signature);
     [inv invoke];
     GCBShowAlert(@"Upload PRG", [NSString stringWithFormat:@"Started via Garmin Connect sender.\n%lu bytes", (unsigned long)size]);
 }
