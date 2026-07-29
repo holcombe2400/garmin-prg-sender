@@ -31,6 +31,7 @@ static id GCBLastGarminDevice;
 static id GCBActiveSwiftFileSender;
 static id GCBActiveSwiftProgressBlock;
 static id GCBActiveSwiftCompletionBlock;
+static BOOL GCBGarminDeviceHookInstalled;
 static UIButton *GCBUploadButton;
 
 static NSString *GCBDirPath(void) {
@@ -537,6 +538,30 @@ static Class GCBFindClassWithInstanceSelector(SEL selector, NSString *nameHint) 
     return found ?: fallback;
 }
 
+static void GCBInstallGarminDeviceHook(void) {
+    if (GCBGarminDeviceHookInstalled) return;
+    SEL selector = @selector(sendRequest:progress:completion:);
+    Class cls = objc_getClass("_TtC16GarminDeviceSync0aB0C");
+    if (!cls || !class_getInstanceMethod(cls, selector)) {
+        cls = GCBFindClassWithInstanceSelector(selector, @"GarminDeviceSync.GarminDevice");
+    }
+
+    NSString *name = cls ? NSStringFromClass(cls) : @"<nil>";
+    if (cls && ([name containsString:@"GarminDeviceSync.GarminDevice"] || [name containsString:@"_TtC16GarminDeviceSync0aB0C"])) {
+        GCBLog(@"using GarminDevice class %@ requestTypes=%@", name, GCBTypeEncodingForSelector(cls, selector));
+        GCBHookInstance(cls, selector, (IMP)GCBGarminDeviceSendRequestProgressCompletion, (IMP *)&origGarminDeviceSendRequestProgressCompletion);
+        GCBGarminDeviceHookInstalled = YES;
+    } else {
+        GCBLog(@"GarminDeviceSync.GarminDevice sender class not ready; got %@", name);
+    }
+}
+
+static void GCBScheduleGarminDeviceHookAttempt(NSTimeInterval delay) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        GCBInstallGarminDeviceHook();
+    });
+}
+
 static void GCBDumpInterestingClasses(void) {
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
@@ -617,21 +642,14 @@ static void GCBInstallHooks(void) {
         GCBFindClassWithInstanceSelector(NSSelectorFromString(@"initWithDevice:"), @"FileSender");
     }
 
-    SEL garminDeviceRequestSelector = @selector(sendRequest:progress:completion:);
-    Class garminDeviceClass = objc_getClass("_TtC16GarminDeviceSync0aB0C");
-    if (!garminDeviceClass || !class_getInstanceMethod(garminDeviceClass, garminDeviceRequestSelector)) {
-        garminDeviceClass = GCBVerboseRuntime() ? GCBFindClassWithInstanceSelector(garminDeviceRequestSelector, @"GarminDeviceSync.GarminDevice") : Nil;
-    }
-    NSString *garminDeviceClassName = garminDeviceClass ? NSStringFromClass(garminDeviceClass) : @"<nil>";
-    if (garminDeviceClass && ([garminDeviceClassName containsString:@"GarminDeviceSync.GarminDevice"] || [garminDeviceClassName containsString:@"_TtC16GarminDeviceSync0aB0C"])) {
-        GCBLog(@"using GarminDevice class %@ requestTypes=%@", garminDeviceClassName, GCBTypeEncodingForSelector(garminDeviceClass, garminDeviceRequestSelector));
-        GCBHookInstance(garminDeviceClass, garminDeviceRequestSelector, (IMP)GCBGarminDeviceSendRequestProgressCompletion, (IMP *)&origGarminDeviceSendRequestProgressCompletion);
-    } else {
-        GCBLog(@"GarminDeviceSync.GarminDevice sender class not found; got %@", garminDeviceClassName);
-    }
+    GCBScheduleGarminDeviceHookAttempt(0.5);
+    GCBScheduleGarminDeviceHookAttempt(3.0);
+    GCBScheduleGarminDeviceHookAttempt(8.0);
+    GCBScheduleGarminDeviceHookAttempt(20.0);
 
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
         GCBInstallUploadButton();
+        GCBScheduleGarminDeviceHookAttempt(0.2);
     }];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         GCBInstallUploadButton();
