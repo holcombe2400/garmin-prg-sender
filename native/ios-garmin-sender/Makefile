@@ -4,7 +4,7 @@ ARCHS := armv7
 include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME = GarminNativeSender
-GarminNativeSender_FILES = main.m AppDelegate.m GNProtocol.m GNTrace.m GNSender.m
+GarminNativeSender_FILES = main.m AppDelegate.m GNProtocol.m GNTrace.m GNSender.m GNCompat.c
 GarminNativeSender_FRAMEWORKS = UIKit CoreBluetooth
 GarminNativeSender_RESOURCE_DIRS = Resources
 GarminNativeSender_CFLAGS = -fobjc-arc -fblocks -Wall -Wextra
