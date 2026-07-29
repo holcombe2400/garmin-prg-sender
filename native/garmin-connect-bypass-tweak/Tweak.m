@@ -21,6 +21,8 @@ static id (*origGDIFileSenderInitWithTaskManager)(id, SEL, id);
 static void (*origGDIFileSenderSetTaskManager)(id, SEL, id);
 static signed char (*origGDIFileSenderSendFileToEdge)(id, SEL, id, unsigned char, unsigned char, id, long long);
 static id (*origGarminDeviceSendRequestProgressCompletion)(id, SEL, id, id, id);
+static id (*origSwiftFileReceiverInitWithDevice)(id, SEL, id);
+static id (*origSwiftFileSenderInitWithDevice)(id, SEL, id);
 static id (*origCochraneInit)(id, SEL);
 static void (*origCochraneRetrieveDeviceData)(id, SEL);
 static void (*origCochraneDidReceiveData)(id, SEL, id, id);
@@ -28,10 +30,13 @@ static void (*origCochraneDidWriteData)(id, SEL, id, id);
 static void (*origCochraneSendSystemEvent)(id, SEL, unsigned char);
 static id GCBLastFileSender;
 static id GCBLastGarminDevice;
+static id GCBLastSwiftFileDevice;
 static id GCBActiveSwiftFileSender;
 static id GCBActiveSwiftProgressBlock;
 static id GCBActiveSwiftCompletionBlock;
 static BOOL GCBGarminDeviceHookInstalled;
+static BOOL GCBSwiftFileReceiverHookInstalled;
+static BOOL GCBSwiftFileSenderHookInstalled;
 static UIButton *GCBUploadButton;
 
 static NSString *GCBDirPath(void) {
@@ -338,10 +343,29 @@ static id GCBGarminDeviceSendRequestProgressCompletion(id self, SEL _cmd, id req
     return origGarminDeviceSendRequestProgressCompletion ? origGarminDeviceSendRequestProgressCompletion(self, _cmd, request, progress, completion) : nil;
 }
 
+static void GCBCaptureSwiftFileDevice(id device, NSString *source) {
+    if (!device) return;
+    GCBLastSwiftFileDevice = device;
+    GCBLog(@"Captured Swift file device via %@ device=%p class=%@",
+           source, device, NSStringFromClass([device class]));
+}
+
+static id GCBSwiftFileReceiverInitWithDevice(id self, SEL _cmd, id device) {
+    id value = origSwiftFileReceiverInitWithDevice ? origSwiftFileReceiverInitWithDevice(self, _cmd, device) : self;
+    GCBCaptureSwiftFileDevice(device, @"FileReceiver initWithDevice");
+    return value;
+}
+
+static id GCBSwiftFileSenderInitWithDevice(id self, SEL _cmd, id device) {
+    id value = origSwiftFileSenderInitWithDevice ? origSwiftFileSenderInitWithDevice(self, _cmd, device) : self;
+    GCBCaptureSwiftFileDevice(device, @"FileSender initWithDevice");
+    return value;
+}
+
 static BOOL GCBUploadPRGViaSwiftFileSender(NSString *path, NSData *prgData, NSUInteger size) {
-    id device = GCBLastGarminDevice;
+    id device = GCBLastSwiftFileDevice ?: GCBLastGarminDevice;
     if (!device) {
-        GCBLog(@"Swift FileSender upload unavailable: no GarminDevice captured yet");
+        GCBLog(@"Swift FileSender upload unavailable: no Garmin file device captured yet");
         return NO;
     }
 
@@ -556,9 +580,35 @@ static void GCBInstallGarminDeviceHook(void) {
     }
 }
 
+static void GCBInstallSwiftFileDeviceHooks(void) {
+    SEL selector = @selector(initWithDevice:);
+    if (!GCBSwiftFileReceiverHookInstalled) {
+        Class receiver = objc_getClass("_TtC16GarminDeviceSync12FileReceiver");
+        if (receiver && class_getInstanceMethod(receiver, selector)) {
+            GCBLog(@"hooking Swift FileReceiver initWithDevice types=%@", GCBTypeEncodingForSelector(receiver, selector));
+            GCBHookInstance(receiver, selector, (IMP)GCBSwiftFileReceiverInitWithDevice, (IMP *)&origSwiftFileReceiverInitWithDevice);
+            GCBSwiftFileReceiverHookInstalled = YES;
+        } else {
+            GCBLog(@"Swift FileReceiver class not ready");
+        }
+    }
+
+    if (!GCBSwiftFileSenderHookInstalled) {
+        Class sender = objc_getClass("_TtC16GarminDeviceSync10FileSender");
+        if (sender && class_getInstanceMethod(sender, selector)) {
+            GCBLog(@"hooking Swift FileSender initWithDevice types=%@", GCBTypeEncodingForSelector(sender, selector));
+            GCBHookInstance(sender, selector, (IMP)GCBSwiftFileSenderInitWithDevice, (IMP *)&origSwiftFileSenderInitWithDevice);
+            GCBSwiftFileSenderHookInstalled = YES;
+        } else {
+            GCBLog(@"Swift FileSender class not ready");
+        }
+    }
+}
+
 static void GCBScheduleGarminDeviceHookAttempt(NSTimeInterval delay) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         GCBInstallGarminDeviceHook();
+        GCBInstallSwiftFileDeviceHooks();
     });
 }
 
