@@ -4,6 +4,7 @@
 #import <CoreBluetooth/CoreBluetooth.h>
 
 static NSString * const GNV2ServiceUUID = @"6A4E2800-667B-11E3-949A-0800200C9A66";
+static NSString * const GNFE1FServiceUUID = @"FE1F";
 static const uint64_t GNGadgetbridgeClientID = 2;
 static const uint8_t GNMlrFlagMask = 0x80;
 static const uint8_t GNMlrHandleMask = 0x70;
@@ -69,6 +70,8 @@ static NSString *GNLocalHex(NSData *data) {
 @property (nonatomic, assign) BOOL readyForUpload;
 @property (nonatomic, assign) NSUInteger bytesSentSinceStart;
 @property (nonatomic, strong) NSDate *uploadStartedAt;
+@property (nonatomic, strong) NSTimer *scanCycleTimer;
+@property (nonatomic, assign) NSUInteger scanCycleIndex;
 @end
 
 @implementation GNSender
@@ -101,12 +104,23 @@ static NSString *GNLocalHex(NSData *data) {
     self.stopped = NO;
     [self.discovered removeAllObjects];
     [self.garminIdentifiers removeAllObjects];
-    [self log:@"Scanning for Garmin BLE advertisements and nearby connectable BLE devices..."];
+    self.scanCycleIndex = 0;
+    [self log:@"Starting Garmin pair hunter. Cycling generic, FE1F, Garmin GFDI, combined, and solicited scans..."];
     if (self.central.state != CBManagerStatePoweredOn) {
         [self log:[NSString stringWithFormat:@"Bluetooth is not powered on yet; state=%ld", (long)self.central.state]];
         return;
     }
-    [self.central stopScan];
+    [self.scanCycleTimer invalidate];
+    [self runNextScanCycle];
+    self.scanCycleTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                                                           target:self
+                                                         selector:@selector(runNextScanCycle)
+                                                         userInfo:nil
+                                                          repeats:YES];
+    [self updateStatus:@"Pair hunting..."];
+}
+
+- (NSMutableDictionary *)garminScanOptionsWithSolicitedServices:(NSArray<CBUUID *> *)solicitedServices {
     NSMutableDictionary *options = [@{
         CBCentralManagerScanOptionAllowDuplicatesKey: @YES,
         @"kCBScanOptionAllowDuplicates": @YES,
@@ -114,9 +128,37 @@ static NSString *GNLocalHex(NSData *data) {
         @"kCBScanOptionScanWindow": @48,
         @"kCBScanOptionScanInterval": @64,
     } mutableCopy];
-    [self log:[NSString stringWithFormat:@"CoreBluetooth scan options: %@", options]];
-    [self.central scanForPeripheralsWithServices:nil options:options];
-    [self updateStatus:@"Scanning..."];
+    if (solicitedServices.count) {
+        options[@"kCBScanOptionSolicitedServiceUUIDs"] = solicitedServices;
+    }
+    return options;
+}
+
+- (void)runNextScanCycle {
+    if (self.stopped || self.central.state != CBManagerStatePoweredOn) return;
+
+    CBUUID *fe1f = [CBUUID UUIDWithString:GNFE1FServiceUUID];
+    CBUUID *gfdi = [CBUUID UUIDWithString:GNV2ServiceUUID];
+    NSArray<NSDictionary *> *cycles = @[
+        @{@"label": @"generic active scan", @"services": @[], @"solicited": @[fe1f, gfdi]},
+        @{@"label": @"FE1F service scan", @"services": @[fe1f], @"solicited": @[fe1f, gfdi]},
+        @{@"label": @"Garmin GFDI service scan", @"services": @[gfdi], @"solicited": @[fe1f, gfdi]},
+        @{@"label": @"combined Garmin service scan", @"services": @[fe1f, gfdi], @"solicited": @[fe1f, gfdi]},
+        @{@"label": @"generic solicited Garmin scan", @"services": @[], @"solicited": @[fe1f, gfdi]},
+    ];
+    NSDictionary *cycle = cycles[self.scanCycleIndex % cycles.count];
+    self.scanCycleIndex++;
+
+    NSArray<CBUUID *> *services = cycle[@"services"];
+    NSArray<CBUUID *> *solicited = cycle[@"solicited"];
+    NSMutableDictionary *options = [self garminScanOptionsWithSolicitedServices:solicited];
+    [self.central stopScan];
+    [self log:[NSString stringWithFormat:@"Pair hunter cycle %lu: %@ services=%@ options=%@",
+               (unsigned long)self.scanCycleIndex,
+               cycle[@"label"],
+               services.count ? services : @"nil",
+               options]];
+    [self.central scanForPeripheralsWithServices:services.count ? services : nil options:options];
 }
 
 - (void)connectFirstDiscoveredPeripheral {
@@ -134,6 +176,8 @@ static NSString *GNLocalHex(NSData *data) {
     selected = selected ?: self.discovered.firstObject;
     self.peripheral = selected;
     self.peripheral.delegate = self;
+    [self.scanCycleTimer invalidate];
+    self.scanCycleTimer = nil;
     [self.central stopScan];
     if (![self.garminIdentifiers containsObject:self.peripheral.identifier]) {
         [self log:@"No Garmin-like candidate was marked, trying the first connectable BLE device seen."];
@@ -172,6 +216,8 @@ static NSString *GNLocalHex(NSData *data) {
 - (void)stop {
     self.stopped = YES;
     self.readyForUpload = NO;
+    [self.scanCycleTimer invalidate];
+    self.scanCycleTimer = nil;
     [self.central stopScan];
     if (self.peripheral) [self.central cancelPeripheralConnection:self.peripheral];
     [self log:@"Stopped and disconnected."];
