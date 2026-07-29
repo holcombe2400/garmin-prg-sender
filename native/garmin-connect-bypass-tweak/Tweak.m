@@ -60,6 +60,10 @@ static BOOL GCBFileExists(NSString *name) {
     return [[NSFileManager defaultManager] fileExistsAtPath:path];
 }
 
+static BOOL GCBVerboseRuntime(void) {
+    return GCBFileExists(@"verbose_runtime");
+}
+
 static NSString *GCBReadTrimmedControlFile(NSString *name) {
     NSString *path = [GCBDirPath() stringByAppendingPathComponent:name];
     NSString *value = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
@@ -174,10 +178,10 @@ static BOOL GCBInterestingText(NSString *text) {
 static uintptr_t GCBDeviceAttributesProductNumber(id self, SEL _cmd) {
     uintptr_t value = origDeviceAttributesProductNumber ? origDeviceAttributesProductNumber(self, _cmd) : 0;
     if (GCBFileExists(@"spoof_product") && value == 3290) {
-        GCBLog(@"DeviceAttributes.productNumber spoof %@ %lu -> 3113 stack=%@", self, (unsigned long)value, GCBStack());
+        GCBLog(@"DeviceAttributes.productNumber spoof %lu -> 3113", (unsigned long)value);
         return 3113;
     }
-    GCBLog(@"DeviceAttributes.productNumber %@ -> %lu", self, (unsigned long)value);
+    if (GCBVerboseRuntime()) GCBLog(@"DeviceAttributes.productNumber %@ -> %lu", self, (unsigned long)value);
     return value;
 }
 
@@ -187,17 +191,17 @@ static uintptr_t GCBDeviceAttributesSoftwareVersion(id self, SEL _cmd) {
         GCBLog(@"DeviceAttributes.softwareVersion spoof %@ %lu -> 1000", self, (unsigned long)value);
         return 1000;
     }
-    GCBLog(@"DeviceAttributes.softwareVersion %@ -> %lu", self, (unsigned long)value);
+    if (GCBVerboseRuntime()) GCBLog(@"DeviceAttributes.softwareVersion %@ -> %lu", self, (unsigned long)value);
     return value;
 }
 
 static unsigned short GCBMessageProductNumber(id self, SEL _cmd) {
     unsigned short value = origMessageProductNumber ? origMessageProductNumber(self, _cmd) : 0;
     if (GCBFileExists(@"spoof_product") && value == 3290) {
-        GCBLog(@"DeviceInfoRequest.productNumber spoof %@ %u -> 3113 stack=%@", self, value, GCBStack());
+        GCBLog(@"DeviceInfoRequest.productNumber spoof %u -> 3113", value);
         return 3113;
     }
-    GCBLog(@"DeviceInfoRequest.productNumber %@ -> %u", self, value);
+    if (GCBVerboseRuntime()) GCBLog(@"DeviceInfoRequest.productNumber %@ -> %u", self, value);
     return value;
 }
 
@@ -207,7 +211,7 @@ static unsigned short GCBMessageProtocolVersion(id self, SEL _cmd) {
         GCBLog(@"DeviceInfoRequest.protocolVersion spoof %@ %u -> 100", self, value);
         return 100;
     }
-    GCBLog(@"DeviceInfoRequest.protocolVersion %@ -> %u", self, value);
+    if (GCBVerboseRuntime()) GCBLog(@"DeviceInfoRequest.protocolVersion %@ -> %u", self, value);
     return value;
 }
 
@@ -217,7 +221,7 @@ static unsigned short GCBMessageSoftwareVersion(id self, SEL _cmd) {
         GCBLog(@"DeviceInfoRequest.softwareVersion spoof %@ %u -> 1000", self, value);
         return 1000;
     }
-    GCBLog(@"DeviceInfoRequest.softwareVersion %@ -> %u", self, value);
+    if (GCBVerboseRuntime()) GCBLog(@"DeviceInfoRequest.softwareVersion %@ -> %u", self, value);
     return value;
 }
 
@@ -577,7 +581,7 @@ static void GCBInstallHooks(void) {
 
     Class nominalFileSender = objc_getClass("GDIFileSender");
     if (nominalFileSender) {
-        GCBDumpMethodsForClassName("GDIFileSender");
+        if (GCBVerboseRuntime()) GCBDumpMethodsForClassName("GDIFileSender");
         GCBHookInstance(nominalFileSender, @selector(initWithTaskManager:), (IMP)GCBGDIFileSenderInitWithTaskManager, (IMP *)&origGDIFileSenderInitWithTaskManager);
         GCBHookInstance(nominalFileSender, @selector(setTaskManager:), (IMP)GCBGDIFileSenderSetTaskManager, (IMP *)&origGDIFileSenderSetTaskManager);
     } else {
@@ -585,13 +589,14 @@ static void GCBInstallHooks(void) {
     }
 
     SEL sendFileSelector = @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:);
-    Class fileSender = nominalFileSender;
+    Class fileSender = objc_getClass("GDICochraneTaskManager");
+    if (!fileSender) fileSender = nominalFileSender;
     if (!fileSender || !class_getInstanceMethod(fileSender, sendFileSelector)) {
-        fileSender = GCBFindClassWithInstanceSelector(sendFileSelector, @"FileSender");
+        fileSender = GCBVerboseRuntime() ? GCBFindClassWithInstanceSelector(sendFileSelector, @"FileSender") : Nil;
     }
     if (fileSender) {
         GCBLog(@"using file sender class %s", class_getName(fileSender));
-        GCBDumpMethodsForClassName(class_getName(fileSender));
+        if (GCBVerboseRuntime()) GCBDumpMethodsForClassName(class_getName(fileSender));
         GCBHookInstance(fileSender, @selector(initWithDelegate:taskManager:), (IMP)GCBGDIFileSenderInitWithDelegate, (IMP *)&origGDIFileSenderInitWithDelegate);
         GCBHookInstance(fileSender, sendFileSelector, (IMP)GCBGDIFileSenderSendFileToEdge, (IMP *)&origGDIFileSenderSendFileToEdge);
         GCBHookInstance(fileSender, @selector(init), (IMP)GCBCochraneInit, (IMP *)&origCochraneInit);
@@ -604,16 +609,18 @@ static void GCBInstallHooks(void) {
         GCBLog(@"No runtime class owns %@", NSStringFromSelector(sendFileSelector));
     }
 
-    GCBDumpMethodsForClassName("_TtC16GarminDeviceSync0aB0C");
-    GCBDumpMethodsForClassName("_TtC16GarminDeviceSync10FileSender");
-    GCBDumpMethodsForClassName("_TtC16GarminDeviceSync14FileSenderTask");
-    GCBFindClassWithInstanceSelector(NSSelectorFromString(@"sendFile:fileType:fileSubType:filePathOnDevice:fileIdentifier:progress:completion:"), @"FileSender");
-    GCBFindClassWithInstanceSelector(NSSelectorFromString(@"initWithDevice:"), @"FileSender");
+    if (GCBVerboseRuntime()) {
+        GCBDumpMethodsForClassName("_TtC16GarminDeviceSync0aB0C");
+        GCBDumpMethodsForClassName("_TtC16GarminDeviceSync10FileSender");
+        GCBDumpMethodsForClassName("_TtC16GarminDeviceSync14FileSenderTask");
+        GCBFindClassWithInstanceSelector(NSSelectorFromString(@"sendFile:fileType:fileSubType:filePathOnDevice:fileIdentifier:progress:completion:"), @"FileSender");
+        GCBFindClassWithInstanceSelector(NSSelectorFromString(@"initWithDevice:"), @"FileSender");
+    }
 
     SEL garminDeviceRequestSelector = @selector(sendRequest:progress:completion:);
     Class garminDeviceClass = objc_getClass("_TtC16GarminDeviceSync0aB0C");
     if (!garminDeviceClass || !class_getInstanceMethod(garminDeviceClass, garminDeviceRequestSelector)) {
-        garminDeviceClass = GCBFindClassWithInstanceSelector(garminDeviceRequestSelector, @"GarminDeviceSync.GarminDevice");
+        garminDeviceClass = GCBVerboseRuntime() ? GCBFindClassWithInstanceSelector(garminDeviceRequestSelector, @"GarminDeviceSync.GarminDevice") : Nil;
     }
     NSString *garminDeviceClassName = garminDeviceClass ? NSStringFromClass(garminDeviceClass) : @"<nil>";
     if (garminDeviceClass && ([garminDeviceClassName containsString:@"GarminDeviceSync.GarminDevice"] || [garminDeviceClassName containsString:@"_TtC16GarminDeviceSync0aB0C"])) {
@@ -635,8 +642,10 @@ __attribute__((constructor))
 static void GCBInit(void) {
     @autoreleasepool {
         GCBInstallHooks();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            GCBDumpInterestingClasses();
-        });
+        if (GCBVerboseRuntime()) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                GCBDumpInterestingClasses();
+            });
+        }
     }
 }
