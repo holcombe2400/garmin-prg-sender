@@ -3,8 +3,6 @@
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <objc/runtime.h>
 
-static NSString * const GCBDir = @"/var/mobile/Documents/GarminConnectBypass";
-static NSString * const GCBLogPath = @"/var/mobile/Documents/GarminConnectBypass/live.log";
 static uintptr_t (*origDeviceAttributesProductNumber)(id, SEL);
 static uintptr_t (*origDeviceAttributesSoftwareVersion)(id, SEL);
 static unsigned short (*origMessageProductNumber)(id, SEL);
@@ -13,6 +11,19 @@ static unsigned short (*origMessageSoftwareVersion)(id, SEL);
 static void (*origCancelPeripheralConnection)(id, SEL, id);
 static NSString *(*origLocalizedString)(id, SEL, NSString *, NSString *, NSString *);
 static id (*origAlertController)(id, SEL, NSString *, NSString *, NSInteger);
+
+static NSString *GCBDirPath(void) {
+    static NSString *dir;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dir = [[NSHomeDirectory() stringByAppendingPathComponent:@"Documents/GarminConnectBypass"] copy];
+    });
+    return dir;
+}
+
+static NSString *GCBLogPath(void) {
+    return [GCBDirPath() stringByAppendingPathComponent:@"live.log"];
+}
 
 #ifdef memset
 #undef memset
@@ -24,13 +35,14 @@ void *memset(void *ptr, int value, unsigned long count) {
 }
 
 static BOOL GCBFileExists(NSString *name) {
-    NSString *path = [GCBDir stringByAppendingPathComponent:name];
+    NSString *path = [GCBDirPath() stringByAppendingPathComponent:name];
     return [[NSFileManager defaultManager] fileExistsAtPath:path];
 }
 
 static void GCBLog(NSString *format, ...) {
     @autoreleasepool {
-        [[NSFileManager defaultManager] createDirectoryAtPath:GCBDir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSString *logPath = GCBLogPath();
+        [[NSFileManager defaultManager] createDirectoryAtPath:GCBDirPath() withIntermediateDirectories:YES attributes:nil error:nil];
         va_list args;
         va_start(args, format);
         NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
@@ -39,11 +51,11 @@ static void GCBLog(NSString *format, ...) {
         formatter.dateFormat = @"HH:mm:ss.SSS";
         NSString *line = [NSString stringWithFormat:@"%@  %@\n", [formatter stringFromDate:[NSDate date]], message];
         NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-        if (![[NSFileManager defaultManager] fileExistsAtPath:GCBLogPath]) {
-            [data writeToFile:GCBLogPath atomically:YES];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
+            [data writeToFile:logPath atomically:YES];
             return;
         }
-        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:GCBLogPath];
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:logPath];
         [handle seekToEndOfFile];
         [handle writeData:data];
         [handle closeFile];
