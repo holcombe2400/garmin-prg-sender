@@ -25,8 +25,15 @@ static void (*origCochraneRetrieveDeviceData)(id, SEL);
 static void (*origCochraneDidReceiveData)(id, SEL, id, id);
 static void (*origCochraneDidWriteData)(id, SEL, id, id);
 static void (*origCochraneSendSystemEvent)(id, SEL, unsigned char);
+static void (*origDeviceSendRequestCompletion)(id, SEL, id, id);
+static void (*origDeviceSendRequestTimeoutProgressCompletion)(id, SEL, id, double, id, id);
+static void (*origRequestSenderSendRequestProgressCompletion)(id, SEL, id, id, id);
 static id GCBLastFileSender;
+static id GCBLastDevice;
+static id GCBLastRequestSender;
 static UIButton *GCBUploadButton;
+
+static void GCBDumpMethodsForClassName(const char *name);
 
 static NSString *GCBDirPath(void) {
     static NSString *dir;
@@ -95,6 +102,133 @@ static NSString *GCBTypeEncodingForSelector(Class cls, SEL selector) {
     if (!method) return @"<missing>";
     const char *types = method_getTypeEncoding(method);
     return types ? [NSString stringWithUTF8String:types] : @"?";
+}
+
+static NSString *GCBClassName(id object) {
+    return object ? NSStringFromClass([object class]) : @"<nil>";
+}
+
+static NSString *GCBHexPrefix(NSData *data, NSUInteger maxBytes) {
+    if (!data.length) return @"";
+    const uint8_t *bytes = data.bytes;
+    NSUInteger count = MIN(data.length, maxBytes);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:count * 2];
+    for (NSUInteger i = 0; i < count; i++) {
+        [hex appendFormat:@"%02x", bytes[i]];
+    }
+    return hex;
+}
+
+static NSString *GCBInspectSelectorValue(id object, SEL selector) {
+    if (!object || ![object respondsToSelector:selector]) return nil;
+    NSMethodSignature *signature = [object methodSignatureForSelector:selector];
+    if (!signature || signature.numberOfArguments != 2 || signature.methodReturnLength == 0) return nil;
+
+    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+    invocation.target = object;
+    invocation.selector = selector;
+    [invocation invoke];
+
+    const char *type = signature.methodReturnType;
+    while (*type == 'r' || *type == 'n' || *type == 'N' || *type == 'o' || *type == 'O' || *type == 'R' || *type == 'V') type++;
+    if (type[0] == '@') {
+        __unsafe_unretained id value = nil;
+        [invocation getReturnValue:&value];
+        if ([value isKindOfClass:[NSData class]]) {
+            NSData *data = (NSData *)value;
+            return [NSString stringWithFormat:@"%@ len=%lu prefix=%@", NSStringFromClass([value class]), (unsigned long)data.length, GCBHexPrefix(data, 16)];
+        }
+        if ([value isKindOfClass:[NSString class]]) {
+            return [NSString stringWithFormat:@"\"%@\"", value];
+        }
+        return value ? [NSString stringWithFormat:@"%@ %@", NSStringFromClass([value class]), value] : @"<nil>";
+    }
+    if (type[0] == 'c') {
+        signed char value = 0;
+        [invocation getReturnValue:&value];
+        return [NSString stringWithFormat:@"%d", value];
+    }
+    if (type[0] == 'C' || type[0] == 'B') {
+        unsigned char value = 0;
+        [invocation getReturnValue:&value];
+        return [NSString stringWithFormat:@"%u", value];
+    }
+    if (type[0] == 's') {
+        short value = 0;
+        [invocation getReturnValue:&value];
+        return [NSString stringWithFormat:@"%d", value];
+    }
+    if (type[0] == 'S') {
+        unsigned short value = 0;
+        [invocation getReturnValue:&value];
+        return [NSString stringWithFormat:@"%u", value];
+    }
+    if (type[0] == 'i' || type[0] == 'l') {
+        int value = 0;
+        [invocation getReturnValue:&value];
+        return [NSString stringWithFormat:@"%d", value];
+    }
+    if (type[0] == 'I' || type[0] == 'L') {
+        unsigned int value = 0;
+        [invocation getReturnValue:&value];
+        return [NSString stringWithFormat:@"%u", value];
+    }
+    if (type[0] == 'q') {
+        long long value = 0;
+        [invocation getReturnValue:&value];
+        return [NSString stringWithFormat:@"%lld", value];
+    }
+    if (type[0] == 'Q') {
+        unsigned long long value = 0;
+        [invocation getReturnValue:&value];
+        return [NSString stringWithFormat:@"%llu", value];
+    }
+    if (type[0] == 'f') {
+        float value = 0;
+        [invocation getReturnValue:&value];
+        return [NSString stringWithFormat:@"%f", value];
+    }
+    if (type[0] == 'd') {
+        double value = 0;
+        [invocation getReturnValue:&value];
+        return [NSString stringWithFormat:@"%f", value];
+    }
+    return [NSString stringWithFormat:@"<return type %s len=%lu>", type, (unsigned long)signature.methodReturnLength];
+}
+
+static void GCBInspectRequest(id request, NSString *source) {
+    if (!request) {
+        GCBLog(@"%@ request=<nil>", source);
+        return;
+    }
+
+    static NSMutableSet *dumpedClasses;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dumpedClasses = [NSMutableSet new];
+    });
+
+    NSString *className = GCBClassName(request);
+    @synchronized (dumpedClasses) {
+        if (![dumpedClasses containsObject:className]) {
+            [dumpedClasses addObject:className];
+            GCBDumpMethodsForClassName(class_getName([request class]));
+        }
+    }
+
+    NSArray *selectors = @[
+        @"fileSize", @"fileDataType", @"fileDataSubType", @"fileIdentifier",
+        @"fileIdentifierMask", @"bigFileIdentifier", @"filePath", @"data",
+        @"offset", @"dataOffset", @"fileCRC", @"dataCRC", @"crc", @"packet",
+        @"message", @"requestID", @"requestId", @"opCode"
+    ];
+    NSMutableArray *parts = [NSMutableArray array];
+    for (NSString *selectorName in selectors) {
+        SEL selector = NSSelectorFromString(selectorName);
+        NSString *value = GCBInspectSelectorValue(request, selector);
+        if (value) [parts addObject:[NSString stringWithFormat:@"%@=%@", selectorName, value]];
+    }
+    GCBLog(@"%@ request=%p class=%@ %@", source, request, className, [parts componentsJoinedByString:@" "]);
 }
 
 static BOOL GCBLooksLikePRGAtPath(NSString *path, NSUInteger *sizeOut) {
@@ -318,6 +452,24 @@ static signed char GCBGDIFileSenderSendFileToEdge(id self, SEL _cmd, id file, un
     return origGDIFileSenderSendFileToEdge ? origGDIFileSenderSendFileToEdge(self, _cmd, file, dataType, subType, deviceFilePath, identifier) : 0;
 }
 
+static void GCBDeviceSendRequestCompletion(id self, SEL _cmd, id request, id completion) {
+    GCBLastDevice = self;
+    GCBInspectRequest(request, @"Device sendRequest:completion:");
+    if (origDeviceSendRequestCompletion) origDeviceSendRequestCompletion(self, _cmd, request, completion);
+}
+
+static void GCBDeviceSendRequestTimeoutProgressCompletion(id self, SEL _cmd, id request, double timeout, id progress, id completion) {
+    GCBLastDevice = self;
+    GCBInspectRequest(request, [NSString stringWithFormat:@"Device sendRequest:timeout:progress:completion: timeout=%0.3f", timeout]);
+    if (origDeviceSendRequestTimeoutProgressCompletion) origDeviceSendRequestTimeoutProgressCompletion(self, _cmd, request, timeout, progress, completion);
+}
+
+static void GCBRequestSenderSendRequestProgressCompletion(id self, SEL _cmd, id request, id progress, id completion) {
+    GCBLastRequestSender = self;
+    GCBInspectRequest(request, @"GFDIRequestSender sendRequest:progress:completion:");
+    if (origRequestSenderSendRequestProgressCompletion) origRequestSenderSendRequestProgressCompletion(self, _cmd, request, progress, completion);
+}
+
 static void GCBUploadPRGNow(void) {
     NSString *path = GCBPRGPath();
     NSUInteger size = 0;
@@ -529,6 +681,31 @@ static void GCBInstallHooks(void) {
     } else {
         GCBLog(@"No runtime class owns %@", NSStringFromSelector(sendFileSelector));
     }
+
+    Class device = objc_getClass("_TtC14GarminDeviceIO0B0C");
+    if (device) {
+        GCBDumpMethodsForClassName(class_getName(device));
+        GCBHookInstance(device, @selector(sendRequest:completion:), (IMP)GCBDeviceSendRequestCompletion, (IMP *)&origDeviceSendRequestCompletion);
+        GCBHookInstance(device, @selector(sendRequest:timeoutInterval:progress:completion:), (IMP)GCBDeviceSendRequestTimeoutProgressCompletion, (IMP *)&origDeviceSendRequestTimeoutProgressCompletion);
+    } else {
+        GCBLog(@"GarminDeviceIO.Device class not found");
+    }
+
+    SEL requestSenderSelector = @selector(sendRequest:progress:completion:);
+    Class requestSender = objc_getClass("_TtC14GarminDeviceIO17GFDIRequestSender");
+    if (!requestSender || !class_getInstanceMethod(requestSender, requestSenderSelector)) {
+        requestSender = GCBFindClassWithInstanceSelector(requestSenderSelector, @"GFDIRequestSender");
+    }
+    if (requestSender) {
+        GCBDumpMethodsForClassName(class_getName(requestSender));
+        GCBHookInstance(requestSender, requestSenderSelector, (IMP)GCBRequestSenderSendRequestProgressCompletion, (IMP *)&origRequestSenderSendRequestProgressCompletion);
+    } else {
+        GCBLog(@"No runtime class owns %@", NSStringFromSelector(requestSenderSelector));
+    }
+
+    GCBDumpMethodsForClassName("_TtC22GarminDeviceIOMessages17CreateFileRequest");
+    GCBDumpMethodsForClassName("_TtC22GarminDeviceIOMessages13UploadRequest");
+    GCBDumpMethodsForClassName("_TtC22GarminDeviceIOMessages23FileTransferDataRequest");
 
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
         GCBInstallUploadButton();
