@@ -85,6 +85,7 @@ static BOOL GCBVerboseRuntime(void) {
 
 static void GCBLog(NSString *format, ...);
 static NSString *GCBReadTrimmedControlFile(NSString *name);
+static void GCBDumpMethodsForClassName(const char *name);
 
 static BOOL GCBReadUnsignedControlFile(NSString *name, unsigned long long *valueOut) {
     NSString *value = GCBReadTrimmedControlFile(name);
@@ -405,12 +406,103 @@ static signed char GCBGDIFileSenderSendFileToEdge(id self, SEL _cmd, id file, un
     return origGDIFileSenderSendFileToEdge ? origGDIFileSenderSendFileToEdge(self, _cmd, file, dataType, subType, deviceFilePath, identifier) : 0;
 }
 
+static BOOL GCBRequestLooksLikeCreateFile(id request) {
+    if (!request) return NO;
+    NSString *name = NSStringFromClass([request class]) ?: @"";
+    return [name containsString:@"CreateFileRequest"];
+}
+
+static NSString *GCBObjectValueForGetter(id object, SEL selector) {
+    if (!object || ![object respondsToSelector:selector]) return @"<missing>";
+    @try {
+        Method method = class_getInstanceMethod([object class], selector);
+        const char *types = method ? method_getTypeEncoding(method) : "";
+        while (*types && *types == 'r') types++;
+        if (types[0] == '@') {
+            id value = ((id (*)(id, SEL))objc_msgSend)(object, selector);
+            return [NSString stringWithFormat:@"%@", value];
+        }
+        if (types[0] == 'C' || types[0] == 'c' || types[0] == 'B') {
+            unsigned char value = ((unsigned char (*)(id, SEL))objc_msgSend)(object, selector);
+            return [NSString stringWithFormat:@"%u", value];
+        }
+        if (types[0] == 'S' || types[0] == 's') {
+            unsigned short value = ((unsigned short (*)(id, SEL))objc_msgSend)(object, selector);
+            return [NSString stringWithFormat:@"%u", value];
+        }
+        if (types[0] == 'I' || types[0] == 'i' || types[0] == 'L' || types[0] == 'l') {
+            unsigned int value = ((unsigned int (*)(id, SEL))objc_msgSend)(object, selector);
+            return [NSString stringWithFormat:@"%u", value];
+        }
+        if (types[0] == 'Q' || types[0] == 'q') {
+            unsigned long long value = ((unsigned long long (*)(id, SEL))objc_msgSend)(object, selector);
+            return [NSString stringWithFormat:@"%llu", value];
+        }
+        return [NSString stringWithFormat:@"<type %s>", types];
+    } @catch (NSException *exception) {
+        return [NSString stringWithFormat:@"<%@>", exception.reason ?: exception.name];
+    }
+}
+
+static void GCBDumpCreateFileRequest(id request, NSString *source) {
+    if (!GCBRequestLooksLikeCreateFile(request)) return;
+    NSString *type = GCBObjectValueForGetter(request, @selector(fileDataType));
+    NSString *subTypes = GCBObjectValueForGetter(request, @selector(fileDataSubTypes));
+    NSString *path = GCBObjectValueForGetter(request, @selector(filePath));
+    NSString *size = GCBObjectValueForGetter(request, @selector(fileSize));
+    NSString *number = GCBObjectValueForGetter(request, @selector(fileNumber));
+    NSString *index = GCBObjectValueForGetter(request, @selector(fileIndex));
+    GCBLog(@"CreateFileRequest %@ class=%@ size=%@ type=%@ subTypes=%@ path=%@ fileNumber=%@ fileIndex=%@ desc=%@",
+           source, NSStringFromClass([request class]), size, type, subTypes, path, number, index, request);
+}
+
+static void GCBApplyRawPRGCreateRequestOverride(id request) {
+    if (!GCBRequestLooksLikeCreateFile(request) || !GCBActivePRGCreateOverride || !GCBRawPRGStageMode()) return;
+    GCBDumpCreateFileRequest(request, @"before raw override");
+
+    @try {
+        if ([request respondsToSelector:@selector(setFileDataType:)]) {
+            ((void (*)(id, SEL, unsigned char))objc_msgSend)(request, @selector(setFileDataType:), GCBPRGType);
+            GCBLog(@"CreateFileRequest sendRequest override fileDataType -> %u", GCBPRGType);
+        }
+        if ([request respondsToSelector:@selector(setFileDataSubTypes:)]) {
+            ((void (*)(id, SEL, unsigned char))objc_msgSend)(request, @selector(setFileDataSubTypes:), GCBPRGSubtype);
+            GCBLog(@"CreateFileRequest sendRequest override fileDataSubTypes -> %u", GCBPRGSubtype);
+        } else {
+            [request setValue:@(GCBPRGSubtype) forKey:@"fileDataSubTypes"];
+            GCBLog(@"CreateFileRequest sendRequest KVC override fileDataSubTypes -> %u", GCBPRGSubtype);
+        }
+        if ([request respondsToSelector:@selector(setFilePath:)]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(request, @selector(setFilePath:), nil);
+            GCBLog(@"CreateFileRequest sendRequest override filePath -> nil");
+        } else {
+            [request setValue:nil forKey:@"filePath"];
+            GCBLog(@"CreateFileRequest sendRequest KVC override filePath -> nil");
+        }
+    } @catch (NSException *exception) {
+        GCBLog(@"CreateFileRequest sendRequest raw override exception %@ %@", exception.name, exception.reason);
+    }
+
+    GCBDumpCreateFileRequest(request, @"after raw override");
+}
+
 static id GCBGarminDeviceSendRequestProgressCompletion(id self, SEL _cmd, id request, id progress, id completion) {
     if (self) {
         GCBLastGarminDevice = self;
         GCBLog(@"Captured GarminDevice via %@ self=%p class=%@ requestClass=%@",
                NSStringFromSelector(_cmd), self, NSStringFromClass([self class]),
                request ? NSStringFromClass([request class]) : @"<nil>");
+    }
+    if (GCBRequestLooksLikeCreateFile(request)) {
+        if (GCBVerboseRuntime()) GCBDumpMethodsForClassName(class_getName([request class]));
+        GCBDumpCreateFileRequest(request, @"at sendRequest");
+        GCBApplyRawPRGCreateRequestOverride(request);
+    } else if (GCBVerboseRuntime() && request) {
+        NSString *requestName = NSStringFromClass([request class]) ?: @"";
+        if ([requestName containsString:@"Upload"] || [requestName containsString:@"FileTransfer"] || [requestName containsString:@"GFDI"]) {
+            GCBLog(@"GarminDevice request %@ desc=%@", requestName, request);
+            GCBDumpMethodsForClassName(class_getName([request class]));
+        }
     }
     return origGarminDeviceSendRequestProgressCompletion ? origGarminDeviceSendRequestProgressCompletion(self, _cmd, request, progress, completion) : nil;
 }
