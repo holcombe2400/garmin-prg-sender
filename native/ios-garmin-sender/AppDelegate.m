@@ -2,6 +2,7 @@
 
 static NSString * const GNExternalDocumentDir = @"/var/mobile/Documents/GarminNativeSender";
 static NSString * const GNInputPrgPath = @"/var/mobile/Documents/GarminNativeSender/input.prg";
+static NSString * const GNLiveLogPath = @"/var/mobile/Documents/GarminNativeSender/live.log";
 
 @interface AppDelegate ()
 @property (nonatomic, strong) GNSender *sender;
@@ -25,6 +26,7 @@ static NSString * const GNInputPrgPath = @"/var/mobile/Documents/GarminNativeSen
                               withIntermediateDirectories:YES
                                                attributes:nil
                                                     error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:GNLiveLogPath error:nil];
 
     self.sender = [[GNSender alloc] init];
     self.sender.delegate = self;
@@ -162,6 +164,15 @@ static NSString * const GNInputPrgPath = @"/var/mobile/Documents/GarminNativeSen
         NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
         formatter.dateFormat = @"HH:mm:ss.SSS";
         NSString *line = [NSString stringWithFormat:@"%@  %@\n", [formatter stringFromDate:[NSDate date]], message];
+        NSData *lineData = [line dataUsingEncoding:NSUTF8StringEncoding];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:GNLiveLogPath]) {
+            [lineData writeToFile:GNLiveLogPath atomically:YES];
+        } else {
+            NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:GNLiveLogPath];
+            [handle seekToEndOfFile];
+            [handle writeData:lineData];
+            [handle closeFile];
+        }
         self.logView.text = [self.logView.text ?: @"" stringByAppendingString:line];
         NSRange bottom = NSMakeRange(MAX((NSInteger)self.logView.text.length - 1, 0), 1);
         [self.logView scrollRangeToVisible:bottom];

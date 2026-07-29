@@ -106,7 +106,7 @@ static NSString *GNLocalHex(NSData *data) {
         [self log:[NSString stringWithFormat:@"Bluetooth is not powered on yet; state=%ld", (long)self.central.state]];
         return;
     }
-    [self.central scanForPeripheralsWithServices:nil options:@{CBCentralManagerScanOptionAllowDuplicatesKey: @NO}];
+    [self.central scanForPeripheralsWithServices:nil options:@{CBCentralManagerScanOptionAllowDuplicatesKey: @YES}];
     [self updateStatus:@"Scanning..."];
 }
 
