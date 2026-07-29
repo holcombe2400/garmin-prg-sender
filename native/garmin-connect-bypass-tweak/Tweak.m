@@ -175,12 +175,11 @@ static void GCBDumpMethodsForClassName(const char *name) {
 }
 
 static void GCBDumpInterestingClasses(void) {
-    int count = objc_getClassList(NULL, 0);
-    Class *classes = (Class *)calloc((size_t)count, sizeof(Class));
-    objc_getClassList(classes, count);
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
     NSArray *needles = @[@"BLEPair", @"BluetoothLowEnergy", @"GCMBLE", @"DeviceInfo", @"DeviceAttributes", @"GarminDevice", @"Handshake", @"GFDI", @"Product", @"Support"];
     NSUInteger logged = 0;
-    for (int i = 0; i < count && logged < 120; i++) {
+    for (unsigned int i = 0; i < count && logged < 120; i++) {
         NSString *name = [NSString stringWithUTF8String:class_getName(classes[i])];
         for (NSString *needle in needles) {
             if ([name containsString:needle]) {
