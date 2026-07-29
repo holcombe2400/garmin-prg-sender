@@ -68,6 +68,7 @@ static NSString *GNLocalHex(NSData *data) {
 @property (nonatomic, assign) NSTimeInterval retransmissionTimeout;
 @property (nonatomic, assign) BOOL stopped;
 @property (nonatomic, assign) BOOL readyForUpload;
+@property (nonatomic, assign) BOOL autoConnectAttempted;
 @property (nonatomic, assign) NSUInteger bytesSentSinceStart;
 @property (nonatomic, strong) NSDate *uploadStartedAt;
 @property (nonatomic, strong) NSTimer *scanCycleTimer;
@@ -102,6 +103,7 @@ static NSString *GNLocalHex(NSData *data) {
 
 - (void)startScan {
     self.stopped = NO;
+    self.autoConnectAttempted = NO;
     [self.discovered removeAllObjects];
     [self.garminIdentifiers removeAllObjects];
     self.scanCycleIndex = 0;
@@ -278,7 +280,12 @@ static NSString *GNLocalHex(NSData *data) {
         if (isConnectable || looksGarmin) {
             if (looksGarmin) {
                 [self.discovered insertObject:peripheral atIndex:0];
-                [self updateStatus:@"Garmin candidate found. Tap Connect First."];
+                [self updateStatus:@"Garmin candidate found. Auto-connecting..."];
+                if (!self.autoConnectAttempted) {
+                    self.autoConnectAttempted = YES;
+                    [self log:@"Auto-connect triggered for Garmin candidate."];
+                    [self connectFirstDiscoveredPeripheral];
+                }
             } else {
                 [self.discovered addObject:peripheral];
                 [self updateStatus:[NSString stringWithFormat:@"Saw %lu connectable BLE device(s). Waiting for Garmin...",
@@ -297,7 +304,8 @@ static NSString *GNLocalHex(NSData *data) {
         [self log:[NSString stringWithFormat:@"Native write limits: withoutResponse=%lu withResponse=%lu", (unsigned long)withoutResponse, (unsigned long)withResponse]];
         if (withoutResponse > 0) self.bleFragmentSize = MIN(self.bleFragmentSize, withoutResponse);
     }
-    [peripheral discoverServices:@[[CBUUID UUIDWithString:GNV2ServiceUUID]]];
+    [self log:@"Discovering all services so we can map Garmin pairing mode."];
+    [peripheral discoverServices:nil];
 }
 
 - (void)centralManager:(CBCentralManager *)central didDisconnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
@@ -316,6 +324,9 @@ static NSString *GNLocalHex(NSData *data) {
     for (CBService *service in peripheral.services) {
         [self log:[NSString stringWithFormat:@"Service %@", service.UUID.UUIDString]];
         if ([[service.UUID.UUIDString uppercaseString] isEqualToString:GNV2ServiceUUID]) {
+            [peripheral discoverCharacteristics:nil forService:service];
+        } else if ([[service.UUID.UUIDString uppercaseString] isEqualToString:GNFE1FServiceUUID]) {
+            [self log:@"FE1F pairing/advertising service is present; discovering its characteristics too."];
             [peripheral discoverCharacteristics:nil forService:service];
         }
     }
