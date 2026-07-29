@@ -106,7 +106,16 @@ static NSString *GNLocalHex(NSData *data) {
         [self log:[NSString stringWithFormat:@"Bluetooth is not powered on yet; state=%ld", (long)self.central.state]];
         return;
     }
-    [self.central scanForPeripheralsWithServices:nil options:@{CBCentralManagerScanOptionAllowDuplicatesKey: @YES}];
+    [self.central stopScan];
+    NSMutableDictionary *options = [@{
+        CBCentralManagerScanOptionAllowDuplicatesKey: @YES,
+        @"kCBScanOptionAllowDuplicates": @YES,
+        @"kCBScanOptionActiveScan": @YES,
+        @"kCBScanOptionScanWindow": @48,
+        @"kCBScanOptionScanInterval": @64,
+    } mutableCopy];
+    [self log:[NSString stringWithFormat:@"CoreBluetooth scan options: %@", options]];
+    [self.central scanForPeripheralsWithServices:nil options:options];
     [self updateStatus:@"Scanning..."];
 }
 
