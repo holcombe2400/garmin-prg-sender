@@ -34,9 +34,9 @@ jobs:
           tar -xJf /tmp/theos-linux-toolchain.tar.xz -C "$GITHUB_WORKSPACE/theos/toolchain"
 
           curl -L --fail \
-            https://github.com/theos/sdks/archive/refs/heads/master.tar.gz \
-            -o /tmp/theos-sdks.tar.gz
-          tar -xzf /tmp/theos-sdks.tar.gz --strip-components=1 -C "$GITHUB_WORKSPACE/theos/sdks"
+            https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS10.3.sdk.tar.xz \
+            -o /tmp/iPhoneOS10.3.sdk.tar.xz
+          tar -xJf /tmp/iPhoneOS10.3.sdk.tar.xz -C "$GITHUB_WORKSPACE/theos/sdks"
 
       - name: Show Theos SDKs
         run: find "$THEOS/sdks" -maxdepth 1 -type d -name "iPhoneOS*.sdk" -print
