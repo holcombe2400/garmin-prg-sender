@@ -6,6 +6,6 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME := GarminConnectBypass
 GarminConnectBypass_FILES := Tweak.m
 GarminConnectBypass_CFLAGS := -fobjc-arc
-GarminConnectBypass_FRAMEWORKS := Foundation UIKit CoreBluetooth
+GarminConnectBypass_FRAMEWORKS := Foundation UIKit CoreBluetooth QuartzCore
 
 include $(THEOS_MAKE_PATH)/tweak.mk

@@ -1,7 +1,12 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <CoreBluetooth/CoreBluetooth.h>
+#import <QuartzCore/QuartzCore.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
+
+static const uint8_t GCBPRGType = 255;
+static const uint8_t GCBPRGSubtype = 17;
 
 static uintptr_t (*origDeviceAttributesProductNumber)(id, SEL);
 static uintptr_t (*origDeviceAttributesSoftwareVersion)(id, SEL);
@@ -11,6 +16,10 @@ static unsigned short (*origMessageSoftwareVersion)(id, SEL);
 static void (*origCancelPeripheralConnection)(id, SEL, id);
 static NSString *(*origLocalizedString)(id, SEL, NSString *, NSString *, NSString *);
 static id (*origAlertController)(id, SEL, NSString *, NSString *, NSInteger);
+static id (*origGDIFileSenderInit)(id, SEL);
+static void (*origGDIFileSenderSendFileToEdge)(id, SEL, id, unsigned long long, unsigned long long, id, unsigned long long);
+static id GCBLastFileSender;
+static UIButton *GCBUploadButton;
 
 static NSString *GCBDirPath(void) {
     static NSString *dir;
@@ -37,6 +46,12 @@ void *memset(void *ptr, int value, unsigned long count) {
 static BOOL GCBFileExists(NSString *name) {
     NSString *path = [GCBDirPath() stringByAppendingPathComponent:name];
     return [[NSFileManager defaultManager] fileExistsAtPath:path];
+}
+
+static NSString *GCBReadTrimmedControlFile(NSString *name) {
+    NSString *path = [GCBDirPath() stringByAppendingPathComponent:name];
+    NSString *value = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    return [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 }
 
 static void GCBLog(NSString *format, ...) {
@@ -66,6 +81,72 @@ static NSString *GCBStack(void) {
     NSArray *stack = [NSThread callStackSymbols];
     NSUInteger count = MIN((NSUInteger)18, stack.count);
     return [[stack subarrayWithRange:NSMakeRange(0, count)] componentsJoinedByString:@" | "];
+}
+
+static NSString *GCBTypeEncodingForSelector(Class cls, SEL selector) {
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!method) return @"<missing>";
+    const char *types = method_getTypeEncoding(method);
+    return types ? [NSString stringWithUTF8String:types] : @"?";
+}
+
+static BOOL GCBLooksLikePRGAtPath(NSString *path, NSUInteger *sizeOut) {
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    NSNumber *size = attrs[NSFileSize];
+    if (sizeOut) *sizeOut = size ? size.unsignedIntegerValue : 0;
+    if (!size || size.unsignedIntegerValue < 3) return NO;
+    NSData *prefix = [NSData dataWithContentsOfFile:path options:0 error:nil];
+    if (prefix.length < 3) return NO;
+    const uint8_t *bytes = prefix.bytes;
+    return bytes[0] == 0xd0 && bytes[1] == 0x00 && bytes[2] == 0xd0;
+}
+
+static NSString *GCBPRGPath(void) {
+    NSString *configured = GCBReadTrimmedControlFile(@"prg_path");
+    NSArray *candidates = configured.length
+        ? @[configured]
+        : @[
+            [GCBDirPath() stringByAppendingPathComponent:@"input.prg"],
+            @"/var/mobile/Documents/GarminNativeSender/input.prg"
+        ];
+    for (NSString *path in candidates) {
+        BOOL isDir = NO;
+        if ([[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir] && !isDir) return path;
+    }
+    return candidates.firstObject;
+}
+
+static void GCBShowAlert(NSString *title, NSString *message) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *root = [UIApplication sharedApplication].keyWindow.rootViewController;
+        while (root.presentedViewController) root = root.presentedViewController;
+        if (!root) return;
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [root presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+static void GCBSetInvocationArg(NSInvocation *inv, NSUInteger index, const char *type, id objectValue, unsigned long long intValue) {
+    while (*type == 'r' || *type == 'n' || *type == 'N' || *type == 'o' || *type == 'O' || *type == 'R' || *type == 'V') type++;
+    if (type[0] == '@') {
+        id value = objectValue;
+        [inv setArgument:&value atIndex:index];
+    } else if (type[0] == 'c' || type[0] == 'C' || type[0] == 'B') {
+        unsigned char value = (unsigned char)intValue;
+        [inv setArgument:&value atIndex:index];
+    } else if (type[0] == 's' || type[0] == 'S') {
+        unsigned short value = (unsigned short)intValue;
+        [inv setArgument:&value atIndex:index];
+    } else if (type[0] == 'i' || type[0] == 'I' || type[0] == 'l' || type[0] == 'L') {
+        unsigned int value = (unsigned int)intValue;
+        [inv setArgument:&value atIndex:index];
+    } else if (type[0] == 'q' || type[0] == 'Q') {
+        unsigned long long value = intValue;
+        [inv setArgument:&value atIndex:index];
+    } else {
+        GCBLog(@"Upload PRG cannot set arg %lu type=%s", (unsigned long)index, type);
+    }
 }
 
 static BOOL GCBInterestingText(NSString *text) {
@@ -157,6 +238,99 @@ static id GCBAlertController(id self, SEL _cmd, NSString *title, NSString *messa
     return origAlertController ? origAlertController(self, _cmd, title, message, style) : nil;
 }
 
+static id GCBGDIFileSenderInit(id self, SEL _cmd) {
+    id value = origGDIFileSenderInit ? origGDIFileSenderInit(self, _cmd) : self;
+    GCBLastFileSender = value;
+    GCBLog(@"GDIFileSender init captured=%@ types sendFile=%@", value, GCBTypeEncodingForSelector(object_getClass(value), @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:)));
+    return value;
+}
+
+static void GCBGDIFileSenderSendFileToEdge(id self, SEL _cmd, id file, unsigned long long dataType, unsigned long long subType, id deviceFilePath, unsigned long long identifier) {
+    GCBLastFileSender = self;
+    GCBLog(@"GDIFileSender sendFileToEdge self=%@ file=%@ fileClass=%@ dataType=%llu subType=%llu deviceFilePath=%@ identifier=%llu stack=%@",
+           self, file, file ? NSStringFromClass([file class]) : @"<nil>", dataType, subType, deviceFilePath, identifier, GCBStack());
+    if (origGDIFileSenderSendFileToEdge) origGDIFileSenderSendFileToEdge(self, _cmd, file, dataType, subType, deviceFilePath, identifier);
+}
+
+static void GCBUploadPRGNow(void) {
+    NSString *path = GCBPRGPath();
+    NSUInteger size = 0;
+    if (!GCBLooksLikePRGAtPath(path, &size)) {
+        GCBLog(@"Upload PRG refused. Missing/invalid PRG at %@", path);
+        GCBShowAlert(@"Upload PRG", [NSString stringWithFormat:@"Put a valid .prg at:\n%@", path]);
+        return;
+    }
+    id sender = GCBLastFileSender;
+    SEL selector = @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:);
+    if (!sender || ![sender respondsToSelector:selector]) {
+        GCBLog(@"Upload PRG requested but no live GDIFileSender is captured yet. path=%@ size=%lu", path, (unsigned long)size);
+        GCBShowAlert(@"Upload PRG", @"Garmin Connect has not exposed its file sender yet. Start a sync once, then tap Upload PRG again.");
+        return;
+    }
+
+    NSMethodSignature *signature = [sender methodSignatureForSelector:selector];
+    if (!signature || signature.numberOfArguments < 7) {
+        GCBLog(@"Upload PRG cannot invoke sendFileToEdge signature=%@ argCount=%lu", signature, (unsigned long)signature.numberOfArguments);
+        GCBShowAlert(@"Upload PRG", @"Garmin file sender signature was not usable. I logged the details.");
+        return;
+    }
+
+    uint64_t identifier = ((uint64_t)[[NSDate date] timeIntervalSince1970] << 16) | (arc4random() & 0xffff);
+    id nilPath = nil;
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:signature];
+    inv.target = sender;
+    inv.selector = selector;
+    GCBSetInvocationArg(inv, 2, [signature getArgumentTypeAtIndex:2], path, 0);
+    GCBSetInvocationArg(inv, 3, [signature getArgumentTypeAtIndex:3], nil, GCBPRGType);
+    GCBSetInvocationArg(inv, 4, [signature getArgumentTypeAtIndex:4], nil, GCBPRGSubtype);
+    GCBSetInvocationArg(inv, 5, [signature getArgumentTypeAtIndex:5], nilPath, 0);
+    GCBSetInvocationArg(inv, 6, [signature getArgumentTypeAtIndex:6], nil, identifier);
+    [inv retainArguments];
+
+    GCBLog(@"Upload PRG invoking sender=%@ path=%@ size=%lu type=%u subtype=%u identifier=%llu signature=%@",
+           sender, path, (unsigned long)size, GCBPRGType, GCBPRGSubtype, identifier, signature);
+    [inv invoke];
+    GCBShowAlert(@"Upload PRG", [NSString stringWithFormat:@"Started via Garmin Connect sender.\n%lu bytes", (unsigned long)size]);
+}
+
+static void GCBUploadButtonTapped(id self, SEL _cmd) {
+    GCBLog(@"Upload PRG button tapped");
+    GCBUploadPRGNow();
+}
+
+static void GCBInstallUploadButton(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *window = [UIApplication sharedApplication].keyWindow;
+        if (!window || GCBUploadButton.superview == window) return;
+        if (!GCBUploadButton) {
+            GCBUploadButton = [UIButton buttonWithType:UIButtonTypeSystem];
+            GCBUploadButton.frame = CGRectMake(12, 76, 92, 38);
+            GCBUploadButton.autoresizingMask = UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleBottomMargin;
+            GCBUploadButton.backgroundColor = [UIColor colorWithRed:0.00 green:0.42 blue:0.86 alpha:0.92];
+            GCBUploadButton.layer.cornerRadius = 8;
+            GCBUploadButton.layer.borderWidth = 1;
+            GCBUploadButton.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.35].CGColor;
+            GCBUploadButton.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+            [GCBUploadButton setTitle:@"Upload PRG" forState:UIControlStateNormal];
+            [GCBUploadButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+            [GCBUploadButton addTarget:[UIApplication sharedApplication] action:@selector(gcb_uploadPRGButtonTapped) forControlEvents:UIControlEventTouchUpInside];
+        }
+        [window addSubview:GCBUploadButton];
+        [window bringSubviewToFront:GCBUploadButton];
+        GCBLog(@"Upload PRG button installed window=%@", window);
+    });
+}
+
+@interface UIApplication (GarminConnectBypassUpload)
+- (void)gcb_uploadPRGButtonTapped;
+@end
+
+@implementation UIApplication (GarminConnectBypassUpload)
+- (void)gcb_uploadPRGButtonTapped {
+    GCBUploadButtonTapped(self, _cmd);
+}
+@end
+
 static void GCBHookInstance(Class cls, SEL selector, IMP replacement, IMP *originalOut) {
     Method method = class_getInstanceMethod(cls, selector);
     if (!method) {
@@ -198,9 +372,9 @@ static void GCBDumpMethodsForClassName(const char *name) {
 static void GCBDumpInterestingClasses(void) {
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
-    NSArray *needles = @[@"BLEPair", @"BluetoothLowEnergy", @"GCMBLE", @"DeviceInfo", @"DeviceAttributes", @"GarminDevice", @"Handshake", @"GFDI", @"Product", @"Support"];
+    NSArray *needles = @[@"BLEPair", @"BluetoothLowEnergy", @"GCMBLE", @"DeviceInfo", @"DeviceAttributes", @"GarminDevice", @"Handshake", @"GFDI", @"Product", @"Support", @"FileSender", @"FileTransfer", @"CreateFile", @"UploadRequest", @"QueuedDownload", @"Synchronization", @"Download", @"Device"];
     NSUInteger logged = 0;
-    for (unsigned int i = 0; i < count && logged < 120; i++) {
+    for (unsigned int i = 0; i < count && logged < 260; i++) {
         NSString *name = [NSString stringWithUTF8String:class_getName(classes[i])];
         for (NSString *needle in needles) {
             if ([name containsString:needle]) {
@@ -236,6 +410,19 @@ static void GCBInstallHooks(void) {
     } else {
         GCBLog(@"DeviceInfoRequest class not found");
     }
+
+    Class fileSender = objc_getClass("GDIFileSender");
+    if (fileSender) {
+        GCBHookInstance(fileSender, @selector(init), (IMP)GCBGDIFileSenderInit, (IMP *)&origGDIFileSenderInit);
+        GCBHookInstance(fileSender, @selector(sendFileToEdge:withDataType:withSubType:deviceFilePath:identifier:), (IMP)GCBGDIFileSenderSendFileToEdge, (IMP *)&origGDIFileSenderSendFileToEdge);
+    } else {
+        GCBLog(@"GDIFileSender class not found");
+    }
+
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+        GCBInstallUploadButton();
+    }];
+    GCBInstallUploadButton();
 }
 
 __attribute__((constructor))
